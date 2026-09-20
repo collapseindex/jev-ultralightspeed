@@ -1,0 +1,16 @@
+# GitHub renders this as a "Sponsor" button on the repo.
+#
+# TWO things are required and this file is only one of them:
+#
+#   1. this file, on the default branch  (done)
+#   2. Settings -> General -> Features -> "Sponsorships", ticked, PER REPO
+#
+# Without (2) the button does not appear even though GitHub has parsed this file
+# and registered the funding link. Confirm the parse without guessing:
+#
+#   gh api graphql -f query='{repository(owner:"collapseindex",name:"dinostomp")
+#                             {fundingLinks{platform url}}}'
+#
+# An org-wide default lives in a `collapseindex/.github` repo: a FUNDING.yml
+# there applies to every repo that does not ship its own.
+github: collapseindex

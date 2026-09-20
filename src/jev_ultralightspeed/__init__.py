@@ -249,6 +249,35 @@ class Client:
             self._pipe.close()
             self._pipe = None
 
+    def stream(
+        self,
+        items: Iterable[str],
+        instructions: str,
+        *,
+        criteria: dict | None = None,
+        options: dict | None = None,
+        chunk: int = 5_000,
+    ):
+        """
+        The same work, yielding answers as they arrive instead of returning
+        them all at once. Nothing bigger than `chunk` items is ever held, so a
+        million rows costs the same memory as five thousand.
+
+            for answer in client.stream(rows, question):
+                writer.writerow([answer.item, answer.label, answer.p])
+
+        The items are taken from any iterable, so they can come off a cursor
+        or a file without being read into a list first.
+        """
+        batch: list[str] = []
+        for item in items:
+            batch.append(item)
+            if len(batch) >= chunk:
+                yield from self.classify(batch, instructions, criteria=criteria, options=options)
+                batch = []
+        if batch:
+            yield from self.classify(batch, instructions, criteria=criteria, options=options)
+
     def classify(
         self,
         items: Sequence[str],

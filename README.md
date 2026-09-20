@@ -149,9 +149,7 @@ the order you passed the items in, however the requests were shuffled to get the
   10,000 entries.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529 with backoff; anything
   else is raised with what the API said.
-- **It is not an eval harness.** For measuring whether a question is any good, see
-  [dinostomp](https://github.com/collapseindex/dinostomp), and for writing the question in the first
-  place, [jev-builder](https://github.com/collapseindex/jev-builder).
+- **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
 
 ## Development
 
@@ -162,6 +160,22 @@ python -m pytest tests -q        # 19 tests, no network, no key needed
 
 The tests replace the one method that talks to the API, so the packing, the deduplication, the cache,
 the ordering, the limiter and the error paths are all checked offline.
+
+## Related
+
+Three tools, one workflow, all Apache-2.0:
+
+- **[dinostomp](https://github.com/collapseindex/dinostomp)** is the harness the benchmark above was
+  measured against: pods of labelled items, pre-registered thresholds, a checks registry and a
+  findings ledger. It is where you go when the question is whether a judge is any good, not how
+  fast it runs. The 1,347 labelled completions in the table are one of its audit pods.
+- **[jev-builder](https://collapseindex.github.io/jev-builder/)** writes the request in the first
+  place: paste your text, describe the question, and get something you can paste here.
+- **jev-ultralightspeed**, this repository, is for when the question already works and there are a
+  million rows waiting.
+
+If any of it saves you an afternoon, [sponsorship](https://github.com/sponsors/collapseindex) keeps
+it maintained. Not required, and nothing here is gated.
 
 ## License
 

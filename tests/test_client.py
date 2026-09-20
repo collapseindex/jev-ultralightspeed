@@ -213,3 +213,19 @@ def test_transport_is_chosen_once_and_checked():
     if not _http2.available():
         with pytest.raises(JevError, match="httpx"):
             Client(key="k", transport="http2")
+
+
+def test_stream_hands_answers_back_in_chunks():
+    client = Fake(pack=4, workers=2)
+    items = [f"message {index}" for index in range(10)]
+    seen = list(client.stream(iter(items), QUESTION, chunk=4))
+    assert [answer.item for answer in seen] == items
+    # Three chunks of at most four, each packed into one request.
+    assert len(client.sent) == 3
+    assert client.usage.items == 10
+
+
+def test_stream_takes_any_iterable():
+    client = Fake(pack=2)
+    seen = list(client.stream((f"row {index}" for index in range(5)), QUESTION, chunk=2))
+    assert len(seen) == 5
