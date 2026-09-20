@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.14.1 (2026-09-20)
+
+### Added
+- **`demo.py`**: two counters, one rate limit, thirty seconds. One request per item against
+  thirty-two, both held to the same 1,000 requests a minute, so the only thing that differs is how
+  many judgements ride on each one. It ends at about **16,000 against 500**, and says what that means
+  for a million rows. Replayed from the recorded run by default, with no key; `--live` runs both arms
+  against the API for about five cents.
+
+  The repo had the most measured numbers of any Jev client and nothing anybody could watch. A number
+  is felt through its delta, so the demo is two bars rather than one.
+
+### Fixed
+- The README said a million rows take a quarter of an hour. At `pack=32` that is 31,250 requests, and
+  at 1,000 a minute it is **half an hour**. The arithmetic was right next to it in the same paragraph.
+- The million-row figures were buried in a footnote about token counts and are now above the fold,
+  where the delta is: **half an hour and $4.99, against seventeen hours and $14.97**.
+
+124 tests, no key and no network needed.
+
 ## v0.14.0 (2026-09-20)
 
 ### Added

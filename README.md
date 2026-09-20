@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.14.0** · Apache-2.0 · no required dependencies
+**v0.14.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -20,6 +20,16 @@ urgent = [a.item for a in answers if a.yes]
 benchmark can detect.** The 32 is the pack depth, and under a ceiling counted in requests that is
 arithmetic rather than a measurement. The 41% and the accuracy are measured, over 30,000 judgements
 against human labels, with a script in this repository.
+
+**A million judgements: half an hour and $4.99. One request per item: seventeen hours and $14.97.**
+Same ceiling, same model, same question. The time is the part you feel.
+
+```bash
+python demo.py        # thirty seconds, both arms, no key needed
+```
+
+Two counters against the same rate limit. After thirty seconds it is about **16,000 judgements
+against 500**, which is the same 32 as everything else here, arriving where you can watch it.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
@@ -602,7 +612,7 @@ of the cache and checkpoint key, and `bench_guidance.py` reruns the comparison f
 
 ### Resuming a job that dies
 
-A million rows take a quarter of an hour and thirty thousand requests. Something will eventually
+A million rows take half an hour and thirty-one thousand requests. Something will eventually
 kill one of those runs at row 800,000, and paying for those 800,000 answers twice is the expensive
 kind of mistake. Pass a `checkpoint` and it cannot happen:
 
@@ -711,6 +721,7 @@ pip install pytest
 python -m pytest tests -q        # 124 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
+python demo.py                                      # the two arms racing, 30s, no key
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls
 TYPESAFE_API_KEY=... python bench_workers.py         # latency against concurrency, ~10 cents
 TYPESAFE_API_KEY=... python bench_trim.py            # how much of an item is needed, ~15 cents
