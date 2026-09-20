@@ -6,7 +6,8 @@ First release.
 
 ### Added
 - A million items in 14.7 minutes for $4.99 with no failures, streamed to a CSV: 1,134.8 items/s
-  over 31,400 requests, holding flat for the whole run. `soak.py` reproduces it.
+  over 31,400 requests, holding flat for the whole run, agreeing with the template each message was
+  generated from 99.79% of the time. `soak.py` reproduces it.
 - `Client.stream()`, which yields answers as they land and never holds more than a chunk, so a
   million rows costs the memory of five thousand.
 - Measured on dinostomp's xstest-refusal pod, 1,347 human-labelled completions: 18x the throughput

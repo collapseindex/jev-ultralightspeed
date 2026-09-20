@@ -36,6 +36,14 @@ TYPESAFE_API_KEY=... python soak.py --items 1000000 --out answers.csv
 The same work one item at a time is 41 hours and $15.70. Nothing was retried, no rate limit was hit,
 and the throughput did not sag over a quarter of an hour of sustained load.
 
+That run is a throughput and stability test: the messages are generated, so there are no human
+labels in it. What it can say about answers is that they agreed with the template each message was
+generated from **99.79%** of the time, and that the 2,091 disagreements were not confident and were
+almost all one template: *"We were charged N times for the {plan} plan this morning"*, which Jev
+often read as billing to sort out rather than something needing a person today. That is a fair
+reading, and it is my label that is arguable. For accuracy against labels a human wrote, see the
+next section.
+
 ## Same accuracy: measured on a real eval
 
 1,347 completions from [XSTest](https://github.com/paul-rottger/exaggerated-safety), labelled
