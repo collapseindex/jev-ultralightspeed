@@ -1,8 +1,8 @@
 # jev-ultralightspeed
 
-**v0.2.0** · Apache-2.0 · no required dependencies
+**v0.2.1** · Apache-2.0 · no required dependencies
 
-<img src="docs/infographic.png" alt="Faster, cheaper, same accuracy: hundreds of items a second against dozens, with agreement against human labels unchanged" width="100%" />
+<img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
 **You have a pile of text and one question about each.** Fifty thousand support tickets to triage.
 A quarter of reviews to sort by sentiment. A month of logs to flag. A column to backfill on a table
@@ -93,24 +93,33 @@ completion 22 times and the unpacked client gives the same label 99.6% of the ti
 98.1%. Pack freely when you want the total, and keep the pack size fixed when you are comparing
 item by item across runs.
 
-Shorter items do better than this on every axis, because the per-item text is a smaller share of
-each request: a million synthetic support messages (138 tokens each) ran at 1,135 items/s in 14.7
-minutes for $4.99, over 31,400 requests with nothing retried. `soak.py --items 1000000` reproduces
-that, and it is a different corpus, so it is a footnote here rather than a headline.
+Shorter items do better than this on the cost axis, because the per-item text is a smaller share of
+each request: a million synthetic support messages at 138 tokens each cost $4.99 for the lot, about
+a third of what one request per item would spend. `soak.py --items 1000000` runs it.
+
+That run's *throughput* figures are not quoted here on purpose. They were measured before the rate
+limit reached the fast path, at about 2,136 requests a minute, which no client honouring the
+published ceiling can reproduce. Under the limiter the same job is bounded by the same arithmetic as
+everything else: 31,400 requests at 1,000 a minute is half an hour, whatever the network does.
 
 ## How
 
-Nothing clever. Four things the obvious loop does not do, in order of how much they gave:
+Nothing clever. Four things the obvious loop does not do. The first is the headline; the other
+three are what stop it becoming the next bottleneck:
 
 1. **Pack.** Several items go in one request as `item_1..item_N`, each with its own question that
-   names the item it judges. One round trip covers thirty-two items, and the shared overhead is paid
-   once instead of thirty-two times. This is where both the speed and the token saving come from.
+   names the item it judges. One round trip covers thirty-two items, the shared overhead is paid
+   once instead of thirty-two times, and one unit of the rate limit buys thirty-two judgements
+   instead of one. Against a limit counted in requests, this is essentially the entire 26.5x.
 2. **Parallel.** Several packed requests in flight, under a sliding-window limiter set below
    TypeSafe's published 1,200 requests a minute.
 3. **One connection, kept open, multiplexed.** With httpx and h2 installed, every request in flight
-   shares a single HTTP/2 connection on one event loop, which measured about twice a thread per
-   connection on HTTP/1.1; keeping it open between calls rather than rebuilding it per batch was
-   worth another 2.5x. The transport idea is lifted from
+   shares a single HTTP/2 connection on one event loop. Measured against a thread per connection on
+   HTTP/1.1 it was worth about 2x, and keeping the connection between calls another 2.5x, in the
+   unlimited regime this library used to run in by mistake. Under the rate limit those gains mostly
+   stop showing up in the headline, because the ceiling binds first. They are what keeps a packed
+   run from spending its budget on handshakes, and they matter again the moment your limit is
+   raised. The transport idea is lifted from
    [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast), who got there first.
 4. **Never ask twice.** Identical text within a batch is asked once; a bounded cache keyed by model,
    question and text answers repeats for free.
@@ -162,7 +171,7 @@ the order you passed the items in, however the requests were shuffled to get the
 
 | argument | default | what it does |
 | --- | --- | --- |
-| `pack` | 8 | items per request. Higher is faster and cheaper, and slower per request. On short items: pack 8 does 320 items/s, pack 32 does 1,130. |
+| `pack` | 8 | items per request, and the whole ballgame: it decides how many items one unit of the rate limit buys. Higher is faster and cheaper per item, and slower per request. |
 | `workers` | 4 | requests in flight. |
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
@@ -182,17 +191,21 @@ the order you passed the items in, however the requests were shuffled to get the
   `pack=1` for adversarial text, keep packs inside one tenant, and see [SECURITY.md](SECURITY.md).
 - **It does not cache across processes.** The cache lives in the client, in memory, bounded at
   10,000 entries.
-- **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529 with backoff; anything
-  else is raised with what the API said.
+- **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529, with jitter and the
+  server's own `Retry-After` when it sends one; anything else is raised with what the API said. A
+  run that fails five times is abandoned rather than sending the rest, so a wrong key costs you five
+  requests instead of thirty thousand. Work already finished is kept: `stream()` yields each chunk
+  as it completes, and after a failed call `client.last_partial` holds the payloads that did
+  arrive.
 - **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
 
 ## Development
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 21 tests, no network, no key needed
+python -m pytest tests -q        # 29 tests, no network, no key needed
 
-TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~13 min, ~$1.20
+TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
 TYPESAFE_API_KEY=... python soak.py --items 100000   # sustained load, ~50 cents
 ```

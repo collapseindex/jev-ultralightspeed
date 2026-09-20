@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.2.1 (2026-09-20)
+
+A third review, mostly of the previous review's fixes.
+
+### Fixed
+- **The threaded path never got the retry manners the fast path did.** It still doubled without
+  jitter and ignored `Retry-After`, and counted its retries outside the lock, which matters because
+  the threaded path is what a plain `pip install jev-ultralightspeed` runs. Both paths now share
+  one backoff.
+- **Two limiters could hold two windows.** The pipe built its own from the same number instead of
+  sharing the client's, so a client touching both paths could reach twice the ceiling: the exact
+  bug the previous release was about. There is one limiter now, and the fast path waits on it
+  before taking a slot rather than inside one.
+- **Nothing failed fast any more.** Letting siblings finish instead of cancelling them meant a
+  wrong key sent every request and took half an hour to say so. A run is now abandoned after five
+  failures, so a wrong key costs five requests: measured at 2.1 seconds over 200 items.
+- **Work finished before a failure was thrown away.** `client.last_partial` holds the payloads that
+  arrived, and `stream()` already yields each chunk as it completes.
+- `warm()` could block for a minute on a busy pool; it gives up after five seconds, because warming
+  is an optimisation and never worth a wait.
+- `Client` is a context manager, which matters now that it owns a pool, a connection and a thread.
+
+### Changed
+- **The throughput figures for the million-item run are withdrawn.** They were measured at about
+  2,136 requests a minute, before the limiter reached the fast path, and no client honouring the
+  published ceiling can reproduce them. Its cost figure stands, since the token arithmetic does not
+  depend on the rate. The same applies to the pack-size throughput numbers in the knobs table.
+- **The "How" list no longer claims an order of importance the rate limit has taken away.** Against
+  a ceiling counted in requests, packing is essentially the whole 26.5x; the transport work is what
+  keeps a packed run from spending its budget on handshakes, and it earns its keep again the moment
+  the limit is raised. Both things are true and they are now stated separately.
+- The test count, the benchmark's runtime and the hero image's alt text now match what they
+  describe. 29 tests.
+
 ## v0.2.0 (2026-09-20)
 
 ### Fixed

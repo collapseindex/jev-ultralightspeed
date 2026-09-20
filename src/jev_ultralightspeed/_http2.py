@@ -40,6 +40,10 @@ def available() -> bool:
     return True
 
 
+# How many failures before a run is abandoned rather than sending the rest.
+GIVE_UP_AFTER = 5
+
+
 def _backoff(attempt: int, retry_after: str | None) -> float:
     """
     How long to wait. The server's own Retry-After wins; otherwise doubling
@@ -63,49 +67,25 @@ def in_a_loop() -> bool:
     return True
 
 
-class _AsyncLimiter:
-    """
-    The sliding window again, for the event loop.
-
-    The threaded client's limiter blocks a thread, which would stall every
-    request sharing this loop, so the same rule is enforced with an awaitable
-    sleep instead.
-    """
-
-    def __init__(self, per_minute: int) -> None:
-        self.per_minute = max(1, per_minute)
-        self._recent: list[float] = []
-        self._lock = asyncio.Lock()
-
-    async def take(self) -> None:
-        while True:
-            async with self._lock:
-                now = time.monotonic()
-                self._recent = [t for t in self._recent if now - t < 60.0]
-                if len(self._recent) < self.per_minute:
-                    self._recent.append(now)
-                    return
-                wait = 60.0 - (now - self._recent[0])
-            await asyncio.sleep(max(0.01, wait))
-
-
 class Pipe:
     """A background event loop holding one HTTP/2 client open."""
 
     def __init__(self, url: str, key: str, *, inflight: int, timeout: float,
-                 retry_statuses, max_retries: int, requests_per_minute: int) -> None:
+                 retry_statuses, max_retries: int, limiter) -> None:
         self.url = url
         self.inflight = max(1, inflight)
         self.timeout = timeout
         self.retry_statuses = retry_statuses
         self.max_retries = max_retries
-        self.requests_per_minute = requests_per_minute
+        # The client's own limiter, shared, so the two transports cannot each
+        # hold a separate window and add up to twice the ceiling.
+        self.limiter = limiter
+        self.broken: str = ""          # set when a run is abandoned
         self._headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
         self._ready = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
         self._gate: asyncio.Semaphore | None = None
-        self._limiter: _AsyncLimiter | None = None
         self._thread = threading.Thread(target=self._run, name="jev-http2", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=10)
@@ -124,7 +104,6 @@ class Pipe:
                                          headers=self._headers,
                                          verify=ssl.create_default_context())
         self._gate = asyncio.Semaphore(self.inflight)
-        self._limiter = _AsyncLimiter(self.requests_per_minute)
         self._ready.set()
         self._loop.run_forever()
 
@@ -139,9 +118,13 @@ class Pipe:
         from . import JevError
 
         for attempt in range(self.max_retries):
+            if self.broken:
+                raise JevError(self.broken)         # the run was abandoned; do not spend more
             wait = None
+            # The ceiling is taken before the slot, so a request waiting for
+            # the rate limit is not sitting on one of the few in-flight slots.
+            await asyncio.to_thread(self.limiter.take)
             async with self._gate:
-                await self._limiter.take()          # the same ceiling the threads keep
                 started = time.monotonic()
                 try:
                     answer = await self._client.post(self.url, json=body)
@@ -166,25 +149,41 @@ class Pipe:
             await asyncio.sleep(wait)               # the slot is free while this waits
         raise JevError("out of retries")
 
-    async def _all(self, bodies, on_request, on_timing, on_retry) -> list[dict]:
+    async def _all(self, bodies, on_request, on_timing, on_retry, on_failure) -> list[dict]:
         """
-        Every request runs to its own end. Without this, one bad answer
-        cancels the siblings mid-flight and a long run returns nothing, having
-        spent the money anyway.
+        Every request runs to its own end rather than being cancelled by a
+        sibling, but a run that is plainly doomed is abandoned early: a wrong
+        key would otherwise send every request, be refused by every one of
+        them, and take half an hour to say so.
         """
-        answers = await asyncio.gather(
-            *(self._one(body, on_request, on_timing, on_retry) for body in bodies),
-            return_exceptions=True)
+        self.broken = ""
+        failures = 0
+
+        async def one(body):
+            nonlocal failures
+            try:
+                return await self._one(body, on_request, on_timing, on_retry)
+            except Exception as error:
+                failures += 1
+                if failures >= GIVE_UP_AFTER and not self.broken:
+                    self.broken = (f"abandoned after {failures} failures, the first being: {error}")
+                raise
+
+        answers = await asyncio.gather(*(one(body) for body in bodies), return_exceptions=True)
+        done = [a for a in answers if not isinstance(a, BaseException)]
         for answer in answers:
             if isinstance(answer, BaseException):
+                if on_failure:
+                    on_failure(done)             # hand back what did arrive
                 raise answer
         return list(answers)
 
     # -- from ordinary code ------------------------------------------------
     def ask_all(self, bodies: Sequence[dict], *, on_request: Callable | None = None,
-                on_timing: Callable | None = None, on_retry: Callable | None = None) -> list[dict]:
+                on_timing: Callable | None = None, on_retry: Callable | None = None,
+                on_failure: Callable | None = None) -> list[dict]:
         future = asyncio.run_coroutine_threadsafe(
-            self._all(bodies, on_request, on_timing, on_retry), self._loop)
+            self._all(bodies, on_request, on_timing, on_retry, on_failure), self._loop)
         return future.result()
 
     def warm(self) -> None:

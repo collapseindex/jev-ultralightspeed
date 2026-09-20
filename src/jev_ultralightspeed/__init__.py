@@ -38,7 +38,7 @@ from typing import Callable, Iterable, Sequence
 
 from . import _http2
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -54,6 +54,7 @@ RETRY_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
 MAX_RETRIES = 5
 TIMEOUT_S = 60.0
 MAX_ITEM_CHARS = 20_000
+WARM_TIMEOUT_S = 5.0                   # warming is an optimisation, never a wait worth minutes
 
 
 class JevError(RuntimeError):
@@ -167,6 +168,7 @@ class Client:
         self._pipe = None
         self._pool: ThreadPoolExecutor | None = None
         self._books = threading.Lock()
+        self.last_partial: list = []       # payloads that arrived before a failed run gave up
         self.latencies: list[float] = []
         self._limiter = _Limiter(requests_per_minute)
         self.usage = Usage()
@@ -206,6 +208,7 @@ class Client:
                    "connection": "keep-alive",
                    "accept": "application/json"}
         for attempt in range(MAX_RETRIES):
+            wait = 0.0
             self._limiter.take()
             started = time.monotonic()
             try:
@@ -216,25 +219,27 @@ class Client:
                 self.latencies.append((time.monotonic() - started) * 1000)
                 if answer.status == 200:
                     return json.loads(payload.decode("utf-8"))
+                hint = answer.getheader("retry-after")
                 self._drop_connection()
                 if answer.status not in RETRY_STATUSES or attempt == MAX_RETRIES - 1:
                     raise JevError(f"Jev answered {answer.status}: "
                                    f"{payload.decode('utf-8', 'replace')[:300]}")
-                self.usage.retries += 1
+                self._count_retry()
+                wait = _http2._backoff(attempt, hint)
             except (http.client.HTTPException, socket.error, ssl.SSLError, TimeoutError) as error:
                 self._drop_connection()
                 if attempt == MAX_RETRIES - 1:
                     raise JevError(f"could not reach Jev: {error}") from error
-                self.usage.retries += 1
-            time.sleep(min(30.0, 2 ** attempt))
+                self._count_retry()
+                wait = _http2._backoff(attempt, None)
+            time.sleep(wait)                    # jittered, and the server's hint when it gave one
         raise JevError("out of retries")
 
     def _pipe_for(self) -> "_http2.Pipe":
         if self._pipe is None:
             self._pipe = _http2.Pipe(self.url, self.key, inflight=self.workers,
                                      timeout=TIMEOUT_S, retry_statuses=RETRY_STATUSES,
-                                     max_retries=MAX_RETRIES,
-                                     requests_per_minute=self._limiter.per_minute)
+                                     max_retries=MAX_RETRIES, limiter=self._limiter)
         return self._pipe
 
     def _pool_for(self) -> ThreadPoolExecutor:
@@ -261,7 +266,7 @@ class Client:
         pool = self._pool_for()
         # One task per worker, held until all of them have a connection, so
         # the work is not all done by the first thread to wake up.
-        gate = threading.Barrier(self.workers, timeout=TIMEOUT_S)
+        gate = threading.Barrier(self.workers, timeout=WARM_TIMEOUT_S)
 
         def open_one(_):
             self._connection()
@@ -273,6 +278,12 @@ class Client:
         list(pool.map(open_one, range(self.workers)))
 
     # -- the useful call ---------------------------------------------------
+    def __enter__(self) -> "Client":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
     def close(self) -> None:
         """Let go of every connection this client opened."""
         self._drop_connection()
@@ -366,7 +377,8 @@ class Client:
                       for g in groups]
             payloads = self._pipe_for().ask_all(
                 bodies, on_request=self._count, on_timing=self.latencies.append,
-                on_retry=self._count_retry)
+                on_retry=self._count_retry,
+                on_failure=lambda done: setattr(self, "last_partial", done))
             for group, data in zip(groups, payloads):
                 for position, index in enumerate(group, start=1):
                     answer = _read(self._entry(data, position), texts[index])

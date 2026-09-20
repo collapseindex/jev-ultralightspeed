@@ -271,13 +271,43 @@ def test_backoff_uses_the_server_hint_and_jitters_otherwise():
     assert all(8.0 <= wait <= 24.0 for wait in waits), sorted(waits)[:3]
 
 
-def test_the_rate_limit_reaches_the_fast_path_too():
+def test_the_fast_path_waits_outside_the_slot_it_holds():
     from jev_ultralightspeed import _http2
     import inspect
 
     source = inspect.getsource(_http2.Pipe._one)
-    assert "_limiter.take()" in source, "the http2 path must hold the same ceiling"
-    assert source.index("_gate") < source.index("_limiter.take()")
-    # And the waiting has to happen outside the semaphore.
+    assert "self.limiter.take" in source, "the http2 path must hold the same ceiling"
+    # Both kinds of waiting happen outside the semaphore: the rate limit before
+    # the slot is taken, the backoff after it is given back.
+    assert source.index("self.limiter.take") < source.index("async with self._gate")
     assert source.index("async with self._gate") < source.index("await asyncio.sleep(wait)")
-    assert "return_exceptions=True" in inspect.getsource(_http2.Pipe._all)
+    everything = inspect.getsource(_http2.Pipe._all)
+    assert "return_exceptions=True" in everything, "a sibling must not cancel the rest"
+    assert "GIVE_UP_AFTER" in everything, "a doomed run must be abandoned, not sent in full"
+
+
+def test_one_limiter_serves_both_transports():
+    client = Fake(transport="threads")
+    assert client._limiter is not None
+    # The pipe is handed the client's limiter rather than making its own, so a
+    # client cannot hold two windows and reach twice the ceiling.
+    import inspect
+    source = inspect.getsource(Client._pipe_for)
+    assert "limiter=self._limiter" in source
+
+
+def test_the_threaded_path_retries_like_the_fast_one():
+    import inspect
+
+    source = inspect.getsource(Client.ask)
+    assert "_backoff" in source, "the threaded path needs jitter and Retry-After too"
+    assert 'getheader("retry-after")' in source
+    assert "self._count_retry()" in source, "counting retries needs the lock"
+    assert "2 ** attempt" not in source, "the bare doubling should be gone"
+
+
+def test_a_client_closes_itself():
+    with Fake(pack=2) as client:
+        client.classify(["a", "b"], QUESTION)
+        assert client._pool is not None
+    assert client._pool is None
