@@ -2,10 +2,13 @@
 
 **v0.1.0** · Apache-2.0 · no required dependencies
 
-Classify a pile of items with [TypeSafe's Jev](https://typesafe.ai).
+<img src="docs/banner.png" alt="A badly drawn blue hedgehog running at light speed past the word jev" width="100%" />
 
 **A million decisions in 14.7 minutes for $4.99, with zero errors.** The obvious loop takes 41 hours
 and costs three times as much.
+
+Classify a pile of items with [TypeSafe's Jev](https://typesafe.ai). Not affiliated with TypeSafe;
+the hedgehog is a parody and belongs to nobody.
 
 ```python
 from jev_ultralightspeed import classify
