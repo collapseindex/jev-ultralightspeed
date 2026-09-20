@@ -276,11 +276,15 @@ def test_the_fast_path_waits_outside_the_slot_it_holds():
     import inspect
 
     source = inspect.getsource(_http2.Pipe._one)
-    assert "self.limiter.take" in source, "the http2 path must hold the same ceiling"
+    assert "_wait_for_the_ceiling" in source, "the http2 path must hold the same ceiling"
     # Both kinds of waiting happen outside the semaphore: the rate limit before
     # the slot is taken, the backoff after it is given back.
-    assert source.index("self.limiter.take") < source.index("async with self._gate")
+    assert source.index("_wait_for_the_ceiling") < source.index("async with self._gate")
     assert source.index("async with self._gate") < source.index("await asyncio.sleep(wait)")
+    # And the abandon check is inside the slot, because gather starts every
+    # coroutine at once and they would all pass a check made before that.
+    inside = source.index("async with self._gate")
+    assert source.index("if run.broken", inside) > inside
     everything = inspect.getsource(_http2.Pipe._all)
     assert "return_exceptions=True" in everything, "a sibling must not cancel the rest"
     assert "GIVE_UP_AFTER" in everything, "a doomed run must be abandoned, not sent in full"
@@ -357,3 +361,72 @@ def test_latencies_do_not_grow_forever():
     for _ in range(MAX_LATENCIES + 250):
         client._note_latency(1.0)
     assert len(client.latencies) == MAX_LATENCIES
+
+
+class Counting:
+    """A server that refuses everything and counts what it was asked."""
+
+    def __init__(self, status=401):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import json as _json
+        import threading as _threading
+
+        self.seen = 0
+        counter = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                counter.seen += 1
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                body = _json.dumps({"detail": "no"}).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1/systemone"
+        _threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+@pytest.mark.parametrize("transport", ["threads", "http2"])
+def test_a_doomed_run_is_abandoned_rather_than_sent_in_full(transport):
+    """
+    The count is the test. A wrong key used to cost every request on the fast
+    path, because `gather` starts every coroutine at once and they all passed
+    the abandon check before the first failure had happened.
+    """
+    from jev_ultralightspeed import _http2
+
+    if transport == "http2" and not _http2.available():
+        pytest.skip("httpx not installed")
+    server = Counting()
+    client = Client(key="wrong", url=server.url, pack=1, workers=8, transport=transport)
+    try:
+        with pytest.raises(JevError):
+            client.classify([f"item {n}" for n in range(200)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert server.seen <= 24, f"{server.seen} of 200 requests went out after the run was doomed"
+
+
+def test_turning_off_dedupe_also_turns_off_the_cache():
+    """
+    `dedupe=False` exists so a repeat is really asked again. The cache is
+    deduplication with a longer memory, so leaving it on quietly undid the
+    flag across `stream()` chunks.
+    """
+    client = Fake(pack=4, dedupe=False)
+    asked = list(client.stream(iter(["same"] * 12), QUESTION, chunk=4))
+    assert len(asked) == 12
+    sent = sum(len(body["state"]) for body in client.sent)
+    assert sent == 12, f"only {sent} of 12 repeats were actually asked"
+    assert client.usage.cached == 0

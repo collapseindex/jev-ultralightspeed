@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.3.0** · Apache-2.0 · no required dependencies
+**v0.3.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -221,8 +221,9 @@ the order you passed the items in, however the requests were shuffled to get the
   10,000 entries.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529, with jitter and the
   server's own `Retry-After` when it sends one; anything else is raised with what the API said. A
-  run that fails five times is abandoned rather than sending the rest, so a wrong key costs you five
-  requests instead of thirty thousand. Work already finished is kept: `stream()` yields each chunk
+  run that fails five times is abandoned rather than sending the rest: a wrong key over 200 items
+  sends 12 requests on the fast path and 9 on the threaded one, counted by a test against a local
+  server that refuses everything, rather than estimated. Work already finished is kept: `stream()` yields each chunk
   as it completes, and after a failed call `client.last_partial` holds the payloads that did
   arrive.
 - **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
@@ -231,7 +232,7 @@ the order you passed the items in, however the requests were shuffled to get the
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 33 tests, no network, no key needed
+python -m pytest tests -q        # 36 tests, a local server, no key needed, no key needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents

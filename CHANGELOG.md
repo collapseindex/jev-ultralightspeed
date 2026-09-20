@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.3.1 (2026-09-20)
+
+A review reproduced two of the last two releases' headline fixes not working. Both reproduce, both
+are fixed, and the repros are in the suite now.
+
+### Fixed
+- **Failing fast did not work on the fast path.** The abandon check sat at the top of each
+  attempt's loop, but `gather` starts every coroutine at once, so all of them passed it before the
+  first failure had happened; and since 401 is not retryable there was never a second attempt where
+  it would fire again. A wrong key sent **200 of 200** requests. The check now sits inside the
+  semaphore, immediately before the request: **12 of 200**, and 9 on the threaded path.
+- **The number in the 0.2.1 changelog was not measured.** "Five requests" came from wall clock on a
+  small run; `usage.requests` counts successful requests, so the figure I quoted counted nothing at
+  all. The suite now counts what leaves the client, against a local server that refuses everything.
+- **`dedupe=False` did not give independent repeats.** The cache is checked first and defaults to
+  on, so across `stream()` chunks the repeats came back from memory: 40 identical items sent 10
+  requests and served 30 copies, which looks like near-perfect consistency and is the exact failure
+  the flag was added to prevent. Turning off deduplication now turns off the cache with it.
+- **The threaded path ignored the URL scheme**, always building an HTTPS connection, so a gateway
+  or a test double on `http://` was unreachable on the transport a plain install uses.
+- `Pipe.broken` was instance state, so two concurrent calls on one client stomped each other; it is
+  per call now.
+- Waiting on the rate limit parked threads of the default executor, which belongs to the host
+  program. The pipe waits on its own.
+- `last_partial` was not cleared at the start of a run on the fast path, so a success could carry
+  stale payloads from an earlier failure.
+- An oversized item now says which item, and that nothing has been sent.
+- `ask()`'s docstring claimed a reopened connection was not counted as a retry. The code counts it.
+
 ## v0.3.0 (2026-09-20)
 
 A fourth review asked two questions a throughput benchmark does not answer, so they were measured.

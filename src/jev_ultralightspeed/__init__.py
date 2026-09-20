@@ -38,7 +38,7 @@ from typing import Callable, Iterable, Sequence
 
 from . import _http2
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -187,9 +187,13 @@ class Client:
         if existing is not None:
             return existing
         parts = urllib.parse.urlsplit(self.url)
-        connection = http.client.HTTPSConnection(
-            parts.hostname, parts.port or 443, timeout=TIMEOUT_S,
-            context=ssl.create_default_context())
+        if parts.scheme == "http":                  # a gateway, a proxy, or a test double
+            connection = http.client.HTTPConnection(parts.hostname, parts.port or 80,
+                                                    timeout=TIMEOUT_S)
+        else:
+            connection = http.client.HTTPSConnection(
+                parts.hostname, parts.port or 443, timeout=TIMEOUT_S,
+                context=ssl.create_default_context())
         self._local.connection = connection
         return connection
 
@@ -205,8 +209,8 @@ class Client:
     def ask(self, body: dict) -> dict:
         """
         One request, on a connection this thread already has open, retrying
-        the statuses worth retrying. A dropped connection is reopened once
-        without counting as a failure: keeping it alive is the whole point.
+        the statuses worth retrying. A dropped connection is reopened and the
+        attempt counted as a retry, like any other.
         """
         data = json.dumps(body).encode("utf-8")
         path = urllib.parse.urlsplit(self.url).path or "/"
@@ -347,11 +351,12 @@ class Client:
         `criteria` says what true and false mean for a yes/no question;
         `options` turns it into a pick-one question over those names.
         """
-        texts = [_clean(item) for item in items]
+        texts = [_clean(item, index) for index, item in enumerate(items)]
         if not texts:
             return []
 
         answers: list[Answer | None] = [None] * len(texts)
+        self.last_partial = []
         todo: list[int] = []
         for index, text in enumerate(texts):
             hit = self._cached(text, instructions, criteria, options)
@@ -397,7 +402,6 @@ class Client:
                     on_progress(done, len(unique))
         elif groups:
             pool = self._pool_for()
-            self.last_partial = []
             for group, result in zip(groups, pool.map(
                 lambda g: self._ask_group([texts[i] for i in g], instructions, criteria, options),
                 groups,
@@ -463,12 +467,14 @@ class Client:
                 json.dumps(options, sort_keys=True))
 
     def _cached(self, text, instructions, criteria, options) -> Answer | None:
-        if not self.cache_on:
+        # Asking again is the whole point of dedupe=False, and a cache read is
+        # just deduplication with a longer memory.
+        if not self.cache_on or not self.dedupe:
             return None
         return self._cache.get(self._key(text, instructions, criteria, options))
 
     def _remember(self, text, instructions, criteria, options, answer: Answer) -> None:
-        if not self.cache_on:
+        if not self.cache_on or not self.dedupe:
             return
         # A copy: what the caller was handed is theirs to mutate.
         self._cache[self._key(text, instructions, criteria, options)] = _copy_answer(answer, text)
@@ -540,10 +546,11 @@ def _float_or_none(value):
         return None
 
 
-def _clean(item: str) -> str:
+def _clean(item: str, index: int = 0) -> str:
     text = item if isinstance(item, str) else str(item)
     if len(text) > MAX_ITEM_CHARS:
-        raise JevError(f"item over {MAX_ITEM_CHARS:,} characters; split it first")
+        raise JevError(f"item {index + 1} is {len(text):,} characters, over the "
+                       f"{MAX_ITEM_CHARS:,} limit; split it first. Nothing has been sent.")
     return text
 
 

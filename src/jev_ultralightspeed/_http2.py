@@ -21,6 +21,7 @@ import random
 import ssl
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Sequence
 
 try:                                        # optional, and checked before use
@@ -67,6 +68,16 @@ def in_a_loop() -> bool:
     return True
 
 
+class _Run:
+    """One call's worth of state: how many have failed, and whether to stop."""
+
+    __slots__ = ("failures", "broken")
+
+    def __init__(self) -> None:
+        self.failures = 0
+        self.broken = ""
+
+
 class Pipe:
     """A background event loop holding one HTTP/2 client open."""
 
@@ -80,17 +91,25 @@ class Pipe:
         # The client's own limiter, shared, so the two transports cannot each
         # hold a separate window and add up to twice the ceiling.
         self.limiter = limiter
-        self.broken: str = ""          # set when a run is abandoned
         self._headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
         self._ready = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
         self._gate: asyncio.Semaphore | None = None
+        self._waiters = ThreadPoolExecutor(max_workers=max(2, self.inflight),
+                                           thread_name_prefix="jev-limit")
         self._thread = threading.Thread(target=self._run, name="jev-http2", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=10)
 
     # -- the loop ----------------------------------------------------------
+    async def _wait_for_the_ceiling(self) -> None:
+        """
+        The limiter blocks, so it waits on this pipe's own threads rather than
+        the default executor, which belongs to whoever imported us.
+        """
+        await self._loop.run_in_executor(self._waiters, self.limiter.take)
+
     def _run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -107,7 +126,7 @@ class Pipe:
         self._ready.set()
         self._loop.run_forever()
 
-    async def _one(self, body: dict, on_request, on_timing, on_retry) -> dict:
+    async def _one(self, body: dict, run, on_request, on_timing, on_retry) -> dict:
         """
         One request, with its waiting done outside the semaphore.
 
@@ -118,13 +137,17 @@ class Pipe:
         from . import JevError
 
         for attempt in range(self.max_retries):
-            if self.broken:
-                raise JevError(self.broken)         # the run was abandoned; do not spend more
+            if run.broken:
+                raise JevError(run.broken)          # abandoned before this one even waited
             wait = None
             # The ceiling is taken before the slot, so a request waiting for
             # the rate limit is not sitting on one of the few in-flight slots.
-            await asyncio.to_thread(self.limiter.take)
+            await self._wait_for_the_ceiling()
             async with self._gate:
+                # Checked again, and this is the one that matters: every
+                # coroutine passed the check above before anything had failed.
+                if run.broken:
+                    raise JevError(run.broken)
                 started = time.monotonic()
                 try:
                     answer = await self._client.post(self.url, json=body)
@@ -156,17 +179,15 @@ class Pipe:
         key would otherwise send every request, be refused by every one of
         them, and take half an hour to say so.
         """
-        self.broken = ""
-        failures = 0
+        run = _Run()                    # per call, so two callers cannot stomp each other
 
         async def one(body):
-            nonlocal failures
             try:
-                return await self._one(body, on_request, on_timing, on_retry)
+                return await self._one(body, run, on_request, on_timing, on_retry)
             except Exception as error:
-                failures += 1
-                if failures >= GIVE_UP_AFTER and not self.broken:
-                    self.broken = (f"abandoned after {failures} failures, the first being: {error}")
+                run.failures += 1
+                if run.failures >= GIVE_UP_AFTER and not run.broken:
+                    run.broken = f"abandoned after {run.failures} failures, the first being: {error}"
                 raise
 
         answers = await asyncio.gather(*(one(body) for body in bodies), return_exceptions=True)
@@ -206,4 +227,5 @@ class Pipe:
             pass
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
+        self._waiters.shutdown(wait=False)
         self._loop = None
