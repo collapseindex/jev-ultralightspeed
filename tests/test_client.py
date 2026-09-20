@@ -1086,3 +1086,95 @@ def test_the_readme_states_the_number_of_tests_there_are(request):
     stated = int(re.search(r"# (\d+) tests", (root / "README.md").read_text(encoding="utf-8"))
                  .group(1))
     assert stated == len(request.session.items)
+
+
+# -- the fast path, over real HTTP/2 ----------------------------------------
+
+def an_h2_server():
+    """The h2 fixture, or a skip saying why it cannot be used here."""
+    from jev_ultralightspeed import _http2
+
+    if not _http2.available():
+        pytest.skip("httpx not installed")
+    try:
+        from h2_server import H2Server, client_context, intercepted
+    except ImportError as error:                    # cryptography or h2 missing
+        pytest.skip(f"the h2 fixture needs {error.name}; it comes with .[dev]")
+    server = H2Server()
+    excuse = intercepted(server)
+    if excuse:
+        server.close()
+        pytest.skip(excuse)
+    return server, client_context(server.ca_path)
+
+
+def test_the_fast_path_really_negotiates_http2_and_multiplexes():
+    """
+    The claim the whole module exists for, and until now no test could see it.
+    Every other server here speaks HTTP/1.1, and httpx falls back to HTTP/1.1
+    whenever ALPN does not offer h2, silently, so "one connection, every request
+    in flight on it" was taken on faith. This server offers h2 and nothing else,
+    and counts the connections as well as the requests.
+    """
+    server, trust = an_h2_server()
+    client = Client(key="k", url=server.url, pack=4, workers=4,
+                    transport="http2", verify=trust)
+    try:
+        answers = client.classify([f"item {n}" for n in range(64)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+
+    assert len(answers) == 64
+    assert all(answer.ok for answer in answers)
+    assert [a.item for a in answers] == [f"item {n}" for n in range(64)]
+    assert client.http_version == "HTTP/2", f"fell back to {client.http_version}"
+    assert server.protocols == {"h2"}
+    assert server.seen == 16
+    assert server.connections == 1, f"{server.connections} connections for 16 requests"
+    assert server.streams > 1, "the requests went one at a time down one connection"
+
+
+def test_the_threaded_path_says_which_protocol_it_used():
+    """HTTP/1.1, and it should say so rather than leave the caller guessing."""
+    server, trust = an_h2_server()
+    client = Client(key="k", url=server.url, pack=4, workers=2,
+                    transport="threads", verify=trust)
+    try:
+        with pytest.raises(JevError):        # an h2-only server refuses HTTP/1.1
+            client.classify(["one"], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert client.http_version == "HTTP/1.1"
+
+
+def test_bringing_your_own_trust_still_offers_http2():
+    """
+    httpx sets ALPN on contexts it builds and not on one it is handed, so a
+    caller with a private CA for their own gateway would have lost the fast path
+    without being told. There is no public getter for a context's ALPN list, so
+    the call is recorded instead.
+    """
+    import ssl as ssl_module
+
+    from jev_ultralightspeed import _http2
+
+    if not _http2.available():
+        pytest.skip("httpx not installed")
+    stdlib = next(cls for cls in ssl_module.SSLContext.__mro__ if cls.__module__ == "ssl")
+    offered = []
+
+    class Recording(stdlib):
+        def set_alpn_protocols(self, protocols):
+            offered.append(list(protocols))
+            return super().set_alpn_protocols(protocols)
+
+    client = Client(key="k", url="https://example.invalid/v1", transport="http2",
+                    verify=Recording(ssl_module.PROTOCOL_TLS_CLIENT))
+    try:
+        client._pipe_for()                       # builds nothing on the network
+    finally:
+        client.close()
+    assert offered, "nobody set ALPN on the caller's own context"
+    assert "h2" in offered[0], offered

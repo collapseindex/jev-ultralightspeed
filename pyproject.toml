@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jev-ultralightspeed"
-version = "0.6.0"
+version = "0.7.0"
 description = "A pile of text, one question about each: bulk classification with TypeSafe's Jev at 26x the throughput and 41% less money, under the published rate limit."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,7 +26,7 @@ Source = "https://github.com/collapseindex/jev-ultralightspeed"
 
 [project.optional-dependencies]
 fast = ["httpx[http2]>=0.27"]
-dev = ["pytest>=8", "httpx[http2]>=0.27"]
+dev = ["pytest>=8", "httpx[http2]>=0.27", "cryptography>=42"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.7.0 (2026-09-20)
+
+This package claims its fast path is about twice as quick because every request in flight shares one
+HTTP/2 connection. Every test it had ran against an HTTP/1.1 server, and httpx falls back to HTTP/1.1
+whenever ALPN does not offer h2 without saying so, which means that claim was taken on faith through
+seven releases. It is now checked against a real h2 server, and checking it found a bug.
+
+### Added
+- **A test that runs the fast path over real HTTP/2**, on loopback, with TLS and a certificate
+  authority of its own: 16 requests for 64 items arrive on **one** connection with more than one
+  stream open at a time, and the negotiated protocol is asserted rather than assumed.
+- **`verify`**, a CA file or an `ssl.SSLContext`, for a gateway signed by a private CA. `url` has
+  always invited pointing this at your own gateway and there was no way to trust one. Never a
+  boolean: switching verification off is something a caller should have to write out.
+- **`client.http_version`**, what the connection actually negotiated. A proxy that strips ALPN costs
+  you the whole reason for installing `[fast]`, silently, and there was no way to find out.
+
+### Fixed
+- **A caller's own TLS context was never offered h2.** httpx sets ALPN on the contexts it builds and
+  not on one it is handed, so anyone passing a context for a private CA would have quietly dropped to
+  HTTP/1.1. Found by the new server, which offers h2 and nothing else.
+- **`isinstance(x, ssl.SSLContext)` is not a reliable check.** `ssl.SSLContext` can be replaced at
+  run time, and pip's vendored truststore does exactly that, so a plain stdlib context was not
+  recognised as one. The base class out of the MRO is what to test against.
+
+### Notes
+Two of the 77 tests skip on a machine whose TLS is intercepted, and they say so rather than passing
+quietly: the machine this was written on has Norton re-signing even 127.0.0.1 with a root it then
+declines to trust, so no local TLS server can be reached at all. That is also the explanation for the
+`CERTIFICATE_VERIFY_FAILED` in v0.1.1. CI has no interceptor, and the fast job now names those tests
+so a skip there would be visible.
+
+77 tests, no key and no network needed.
+
 ## v0.6.0 (2026-09-20)
 
 A scheduling review found that waiting was the problem in four separate places: waiting for a

@@ -109,8 +109,20 @@ class Pipe:
     """A background event loop holding one HTTP/2 client open."""
 
     def __init__(self, url: str, key: str, *, inflight: int, timeout: float,
-                 retry_statuses, max_retries: int, limiter) -> None:
+                 retry_statuses, max_retries: int, limiter,
+                 verify=None, on_protocol=None) -> None:
         self.url = url
+        self.verify = verify if verify is not None else ssl.create_default_context()
+        # ALPN has to be on the context, or h2 is never offered and the whole
+        # reason for this module quietly becomes HTTP/1.1. httpx sets it on the
+        # contexts it builds itself and not on one it is handed, so a caller
+        # bringing their own trust for a private gateway would lose the fast path
+        # without being told.
+        try:
+            self.verify.set_alpn_protocols(["h2", "http/1.1"])
+        except (AttributeError, NotImplementedError):     # not a context we can steer
+            pass
+        self.on_protocol = on_protocol
         self.inflight = max(1, inflight)
         self.timeout = timeout
         self.retry_statuses = retry_statuses
@@ -161,7 +173,7 @@ class Pipe:
         # an antivirus whose root lives in the OS store.
         self._client = httpx.AsyncClient(http2=True, timeout=self.timeout, limits=limits,
                                          headers=self._headers,
-                                         verify=ssl.create_default_context())
+                                         verify=self.verify)
         self._gate = asyncio.Semaphore(self.inflight)
         self._ready.set()
         self._loop.run_forever()
@@ -191,6 +203,8 @@ class Pipe:
                 started = time.monotonic()
                 try:
                     answer = await self._client.post(self.url, json=body)
+                    if self.on_protocol:
+                        self.on_protocol(answer.http_version)   # h2, or the quiet fallback
                     if on_timing:
                         on_timing((time.monotonic() - started) * 1000)
                     if answer.status_code == 200:

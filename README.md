@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.6.0** · Apache-2.0 · no required dependencies
+**v0.7.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -250,6 +250,14 @@ the order you passed the items in, however the requests were shuffled to get the
 | `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
 | `model` | `jev-latest` | passed straight through. |
 | `url` | the Jev endpoint | point it at a gateway or a mock. |
+| `verify` | the machine's trust store | a CA file or an `ssl.SSLContext`, for a gateway signed by a private CA. Never a boolean: switching verification off is something you should have to write out yourself. |
+
+`client.http_version` says what the connection actually negotiated, `"HTTP/2"` or `"HTTP/1.1"`, after
+the first call. It is worth looking at once. httpx falls back to HTTP/1.1 whenever ALPN does not
+offer h2 and says nothing about it, so a proxy that strips ALPN costs you the entire reason for
+installing the extra, silently. A test now runs the fast path against a real h2 server and checks
+that 16 requests arrived on **one** connection with more than one stream open at a time, which is
+the claim this package is built on and was previously taken on faith.
 
 `pack` is a maximum, not a promise. TypeSafe documents 64k tokens in a request and 32k for the state
 plus the longest question, and `pack` counts items, so several individually legal items can make one
@@ -343,7 +351,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 74 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 77 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents

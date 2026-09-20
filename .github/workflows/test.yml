@@ -28,8 +28,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest ".[fast]"
+      - run: pip install pytest ".[dev]"
       - run: python -m pytest tests -q
+      - name: HTTP/2 was really negotiated, not silently fallen back to
+        # The only place this can be checked: a TLS interceptor on a developer
+        # machine re-signs even loopback, and then the test skips itself.
+        run: python -m pytest tests -q -k http2_server -v --no-header -rA
       - name: the fast transport is the one chosen
         run: |
           python - <<'PY'

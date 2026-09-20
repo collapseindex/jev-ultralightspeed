@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -56,6 +56,10 @@ MAX_RETRIES = 5
 TIMEOUT_S = 60.0
 MAX_ITEM_CHARS = 20_000
 WARM_TIMEOUT_S = 5.0                   # warming is an optimisation, never a wait worth minutes
+# `ssl.SSLContext` can be replaced at run time: pip's vendored truststore swaps in
+# a subclass that defers to the operating system, and then isinstance against the
+# module attribute misses a plain stdlib context. The base class is what to check.
+SSL_CONTEXT = next(cls for cls in ssl.SSLContext.__mro__ if cls.__module__ == "ssl")
 MAX_LATENCIES = 10_000                 # kept for percentiles, not forever
 # The provider documents 64k tokens in a request and 32k for the state plus the
 # longest question, and says the limits can change. Held well under both, because
@@ -192,6 +196,7 @@ class Client:
         cache: bool = True,
         dedupe: bool = True,
         transport: str = "auto",
+        verify: str | os.PathLike | ssl.SSLContext | None = None,
     ) -> None:
         self.key = key or os.environ.get("TYPESAFE_API_KEY", "")
         if not self.key:
@@ -214,6 +219,12 @@ class Client:
                            'thread (asyncio.to_thread), or pass transport="threads"')
         self.transport = ("http2" if transport == "auto" and _http2.available()
                           else "threads" if transport == "auto" else transport)
+        # Whose word to take for the server's certificate. None is the machine's
+        # own trust store, which is right for api.typesafe.ai and wrong for a
+        # gateway signed by a private CA, which `url` otherwise invites you to use.
+        # A path or a context, never a boolean: turning verification off is a
+        # thing you should have to write out yourself.
+        self.verify = verify
         self._cache: OrderedDict[tuple, Answer] = OrderedDict()
         self._local = threading.local()
         self._pipe = None
@@ -223,10 +234,19 @@ class Client:
         self.last_partial: list = []       # answers that arrived before a failed run gave up
         self.failures: list[Answer] = []   # items skipped under on_error="skip"
         self.latencies: list[float] = []
+        self.http_version = ""             # what the connection actually negotiated
         self._limiter = _Limiter(requests_per_minute)
         self.usage = Usage()
 
     # -- the one call ------------------------------------------------------
+    def _trust(self) -> ssl.SSLContext:
+        """The context to verify the server with, built once per call site."""
+        if isinstance(self.verify, SSL_CONTEXT):
+            return self.verify
+        if self.verify is not None:
+            return ssl.create_default_context(cafile=os.fspath(self.verify))
+        return ssl.create_default_context()
+
     def _connection(self) -> http.client.HTTPSConnection:
         """One live connection per worker thread, kept between requests."""
         existing = getattr(self._local, "connection", None)
@@ -239,7 +259,8 @@ class Client:
         else:
             connection = http.client.HTTPSConnection(
                 parts.hostname, parts.port or 443, timeout=TIMEOUT_S,
-                context=ssl.create_default_context())
+                context=self._trust())
+            self.http_version = "HTTP/1.1"      # the standard library speaks one protocol
         self._local.connection = connection
         return connection
 
@@ -296,7 +317,9 @@ class Client:
         if self._pipe is None:
             self._pipe = _http2.Pipe(self.url, self.key, inflight=self.workers,
                                      timeout=TIMEOUT_S, retry_statuses=RETRY_STATUSES,
-                                     max_retries=MAX_RETRIES, limiter=self._limiter)
+                                     max_retries=MAX_RETRIES, limiter=self._limiter,
+                                     verify=self._trust(),
+                                     on_protocol=self._note_protocol)
         return self._pipe
 
     def _pool_for(self) -> ThreadPoolExecutor:
@@ -690,6 +713,16 @@ class Client:
             self.usage.input_tokens += int(usage.get("input_tokens") or 0)
             self.usage.output_tokens += int(usage.get("output_tokens") or 0)
 
+    def _note_protocol(self, version: str) -> None:
+        """
+        What the first response came back on. httpx falls back to HTTP/1.1
+        whenever ALPN does not offer h2, quietly, and a proxy that strips ALPN
+        costs you the whole reason for installing the extra. This is how you find
+        out: `client.http_version` after the first call.
+        """
+        if not self.http_version:
+            self.http_version = version
+
     def _note_latency(self, milliseconds: float) -> None:
         """The last few thousand, so a long-lived client does not grow a list forever."""
         with self._books:
@@ -864,7 +897,7 @@ def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
     """One call for the common case. Keyword arguments go to `Client`."""
     client_arguments = {name: kwargs.pop(name) for name in
                         ("key", "url", "model", "pack", "workers", "requests_per_minute",
-                         "cache", "dedupe", "transport")
+                         "cache", "dedupe", "transport", "verify")
                         if name in kwargs}
     client = Client(**client_arguments)
     try:
