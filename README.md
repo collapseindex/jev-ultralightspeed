@@ -79,6 +79,10 @@ This is not Jev against some other model. It is **jev-1.13.0 against itself**: s
 question, same items, same criteria. The only thing that changes is how this client shapes the
 requests.
 
+Run again a day later, the table came back 42.0, 280.8 and 824.2 items/s at 89.1%, 90.1% and 90.7%,
+which is 19.6x. The 18x above is the slower of the two runs, kept because quoting your best number
+is how benchmarks stop being believed.
+
 The three intervals overlap, so the judge is as good packed as it is one item at a time.
 
 One thing worth knowing rather than discovering later. Packing changes which individual items get
@@ -182,7 +186,7 @@ the order you passed the items in, however the requests were shuffled to get the
 
 | argument | default | what it does |
 | --- | --- | --- |
-| `pack` | 8 | items per request. Higher is faster and cheaper, and slower per request. |
+| `pack` | 8 | items per request. Higher is faster and cheaper, and slower per request. Measured on 30,000 items: pack 8 does 320 items/s at $5.95 a million, pack 32 does 1,130 at $4.99. |
 | `workers` | 4 | requests in flight. |
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |

@@ -5,6 +5,8 @@
 First release.
 
 ### Added
+- The eval table reproduced on a third independent run (42.0, 280.8, 824.2 items/s at 89.1%, 90.1%,
+  90.7%, which is 19.6x), and 30,000 items at the default pack 8 (320 items/s, 0 retried).
 - `usage.retries`, so "no failures" is a number the client counted rather than the absence of a
   complaint. Both transports report it.
 - A million items in 14.7 minutes for $4.99, with none of the 31,400 requests failing or retried in
