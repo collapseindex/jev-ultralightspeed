@@ -94,11 +94,17 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--offline", action="store_true",
                         help="measure the client's own work, with no API calls at all")
+    parser.add_argument("--throttle", action="store_true",
+                        help="paced against bursting, at a local server that throttles bursts")
     parser.add_argument("--transport", default="auto", choices=("auto", "http2", "threads"))
     arguments = parser.parse_args()
     if arguments.offline:
         from bench_cpu import measure_local
         return measure_local(arguments.items, arguments.rounds, arguments.seed)
+    if arguments.throttle:
+        from bench_throttle import measure_throttle
+        return measure_throttle(arguments.items, arguments.rounds, arguments.seed,
+                                arguments.transport)
 
     items = corpus(arguments.items)
     random.seed(arguments.seed)

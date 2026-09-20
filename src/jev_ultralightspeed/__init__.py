@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -159,11 +159,23 @@ class Usage:
 
 
 class _Limiter:
-    """A plain sliding window, shared by every worker."""
+    """
+    A sliding window, shared by every worker, and optionally an even pace.
 
-    def __init__(self, per_minute: int) -> None:
+    The window is a deque that old stamps are popped off the front of. It used to
+    be a list rebuilt from scratch on every permit, which at a thousand a minute
+    meant walking a thousand timestamps to hand out one.
+
+    Pacing puts a floor under the gap between sends. The window alone allows a
+    thousand requests in the first second of a minute and then nothing, which is
+    fine by the published ceiling and not always fine by the service.
+    """
+
+    def __init__(self, per_minute: int, *, paced: bool = False) -> None:
         self.per_minute = max(1, per_minute)
-        self._recent: list[float] = []
+        self._recent: deque[float] = deque()
+        self._interval = 60.0 / self.per_minute if paced else 0.0
+        self._next_send = 0.0
         self._lock = threading.Lock()
 
     def try_take(self) -> float:
@@ -176,11 +188,18 @@ class _Limiter:
         """
         with self._lock:
             now = time.monotonic()
-            self._recent = [t for t in self._recent if now - t < 60.0]
-            if len(self._recent) < self.per_minute:
-                self._recent.append(now)
-                return 0.0
-            return max(0.01, 60.0 - (now - self._recent[0]))
+            while self._recent and now - self._recent[0] >= 60.0:
+                self._recent.popleft()
+            wait = max(0.0, self._next_send - now)
+            if len(self._recent) >= self.per_minute:
+                wait = max(wait, 60.0 - (now - self._recent[0]))
+            if wait > 0.0:
+                return max(0.001, wait)
+            self._recent.append(now)
+            # Set, not advanced: waking after a quiet spell must not release a
+            # burst of everything the pace would have allowed while nothing ran.
+            self._next_send = now + self._interval
+            return 0.0
 
     def take(self) -> None:
         """The blocking form, for the threaded transport."""
@@ -203,6 +222,7 @@ class Client:
         pack: int = PACK,
         workers: int = WORKERS,
         requests_per_minute: int = REQUESTS_PER_MINUTE,
+        paced: bool = False,
         cache: bool = True,
         dedupe: bool = True,
         transport: str = "auto",
@@ -252,7 +272,7 @@ class Client:
         self.failures: list[Answer] = []   # items skipped under on_error="skip"
         self.latencies: list[float] = []
         self.http_version = ""             # what the connection actually negotiated
-        self._limiter = _Limiter(requests_per_minute)
+        self._limiter = _Limiter(requests_per_minute, paced=paced)
         self.usage = Usage()
 
     # -- the one call ------------------------------------------------------
@@ -997,7 +1017,7 @@ def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
     """One call for the common case. Keyword arguments go to `Client`."""
     client_arguments = {name: kwargs.pop(name) for name in
                         ("key", "url", "model", "pack", "workers", "requests_per_minute",
-                         "cache", "dedupe", "transport", "verify", "guidance")
+                         "cache", "dedupe", "transport", "verify", "guidance", "paced")
                         if name in kwargs}
     client = Client(**client_arguments)
     try:

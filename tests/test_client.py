@@ -1442,3 +1442,61 @@ def test_a_mutated_question_does_not_poison_the_cache_key():
     client.classify(items, QUESTION, criteria=dict(original))
     fresh = client.usage.cached - already
     assert fresh == len(items), f"only {fresh} of {len(items)} were filed under the real question"
+
+
+# -- pacing -----------------------------------------------------------------
+
+def test_an_unpaced_limiter_hands_out_the_whole_window_at_once():
+    """The published ceiling is a minute's worth, and says nothing about a second."""
+    limiter = _Limiter(600)
+    assert all(limiter.try_take() == 0.0 for _ in range(600))
+    assert limiter.try_take() > 0.0
+
+
+def test_a_paced_limiter_puts_a_floor_under_the_gap():
+    limiter = _Limiter(600, paced=True)          # a tenth of a second apart
+    assert limiter.try_take() == 0.0
+    wait = limiter.try_take()
+    assert 0.0 < wait <= 0.1, wait
+    time.sleep(wait)
+    assert limiter.try_take() == 0.0
+
+
+def test_pacing_does_not_bank_credit_while_nothing_is_running():
+    """
+    Waking after a quiet spell must not release everything the pace would have
+    allowed meanwhile, which is the bug that makes a pacer worse than useless.
+    """
+    limiter = _Limiter(600, paced=True)
+    assert limiter.try_take() == 0.0
+    time.sleep(0.25)                             # two and a half intervals of nothing
+    assert limiter.try_take() == 0.0             # one is owed
+    assert limiter.try_take() > 0.0, "the pause was cashed in as a burst"
+
+
+def test_a_paced_limiter_still_holds_the_minute():
+    limiter = _Limiter(2, paced=True)            # thirty seconds apart, two a minute
+    assert limiter.try_take() == 0.0
+    assert 0.0 < limiter.try_take() <= 30.0
+
+
+def test_the_window_lets_old_stamps_go():
+    limiter = _Limiter(3)
+    for _ in range(3):
+        limiter.try_take()
+    assert limiter.try_take() > 0.0
+    limiter._recent[0] -= 61.0                   # as if that one were a minute ago
+    assert limiter.try_take() == 0.0
+
+
+@both_transports
+def test_pacing_is_off_unless_asked_for(transport):
+    server = Answering()
+    client = a_real_client(server.url, transport, pack=4, workers=2)
+    try:
+        assert client._limiter._interval == 0.0
+        client.classify([f"item {n}" for n in range(8)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert server.seen == 2

@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.10.0** · Apache-2.0 · no required dependencies
+**v0.10.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -249,6 +249,7 @@ agreement rate. See [Knowing which verdicts to trust](#knowing-which-verdicts-to
 | `workers` | 4 | requests in flight. |
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
+| `paced` | False | spread requests evenly instead of letting a minute's worth go at once. Only useful against a service that throttles short bursts, and see below before turning it on. |
 | `cache` | True | answer repeats from memory, keyed by model, question and text. |
 | `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
 | `model` | `jev-latest` | passed straight through. |
@@ -313,6 +314,38 @@ unchanged. Worth it when the question is long relative to the items, not otherwi
 ```bash
 TYPESAFE_API_KEY=... python bench_tuning.py        # eight shapes, ~35 cents
 python bench_tuning.py --analyse data/results/<file>
+```
+
+### Pacing, and why it is off
+
+The limiter holds a minute's worth, which means a thousand requests may all leave in the first second
+of a minute and nothing after. That is inside TypeSafe's published ceiling and it is not inside every
+service's idea of fair. `paced=True` puts a floor under the gap between sends instead:
+
+```python
+client = Client(pack=32, workers=8, paced=True)
+```
+
+Against a local server that throttles anything over five requests per 200ms, it is the difference
+between fighting the throttle and not:
+
+| | items/s | retries | requests attempted |
+| --- | ---: | ---: | ---: |
+| bursting | 113.4 | 21 | 53 |
+| paced | **196.4** | **1** | **33** |
+
+**That is a local server, and we could not make the real one behave like it.** Across the eight arms
+of the tuning sweep the client burst to between 915 and **2,087 requests a minute** against a
+published 1,200, and at `pack=64` it pushed past the documented 250,000 tokens a second as well.
+Retries across all eight: **zero**. So on the public endpoint, today, pacing had nothing to fix, and
+turning it on can only make a short job slower.
+
+It is here because the 245 retries in the headline benchmark are still unexplained, and because
+somebody on a stricter allocation may meet a throttle we cannot. If `usage.retries` is climbing, try
+it. If it is not, do not.
+
+```bash
+python bench.py --throttle --items 256 --rounds 3    # the table above, no key needed
 ```
 
 ### Knowing which verdicts to trust
@@ -530,7 +563,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 96 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 103 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls

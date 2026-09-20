@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.10.1 (2026-09-20)
+
+### Fixed
+- **The rate limiter walked its whole window to hand out one permit.** It kept recent timestamps in a
+  list and rebuilt that list on every call, so at a thousand a minute it compared a thousand stamps
+  per request. It is a deque that old stamps are popped off the front of now, which is constant work
+  instead of work proportional to the ceiling:
+
+  | window | before | after |
+  | ---: | ---: | ---: |
+  | 1,000 a minute | 32.6us a permit | **0.51us** |
+  | 10,000 a minute | 269.9us a permit | **0.77us** |
+
+  Invisible at the default, where a request takes 577ms. It matters on a higher allocation: at 10,000
+  a minute the old one spent 2.7 seconds a minute inside a lock every worker has to queue behind.
+
+### Added
+- **`paced=True`**, which spreads requests evenly instead of letting a minute's worth go at once.
+  Against a local server that throttles anything over five requests per 200ms it is worth 113 to 196
+  items a second and takes retries from 21 to 1.
+
+  **It is off by default because we could not make the real service behave like that server.** Across
+  the eight arms of the tuning sweep the client burst to between 915 and 2,087 requests a minute
+  against a published ceiling of 1,200, and at `pack=64` it exceeded the documented 250,000 tokens a
+  second too. Retries across all eight arms: zero. On the public endpoint, today, pacing has nothing
+  to fix and can only slow a short job down. It is here because the 245 retries in the headline
+  benchmark are still unexplained and somebody on a stricter allocation may meet a throttle we cannot.
+- `python bench.py --throttle`, which reproduces that table locally with no key.
+
+Thanks to the reviewer for the patch, the throttle server and the deque. The pacing documentation is
+mine: a feature whose benefit does not reproduce against the real service should say so where people
+will read it, not only in a changelog.
+
+103 tests, no key and no network needed.
+
 ## v0.10.0 (2026-09-20)
 
 Tuning for throughput alone stopped being the right objective when `triage` arrived, because `triage`
