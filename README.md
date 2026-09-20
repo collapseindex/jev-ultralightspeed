@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.9.0** · Apache-2.0 · no required dependencies
+**v0.9.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -484,9 +484,10 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 94 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 96 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
+python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
 TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
 TYPESAFE_API_KEY=... python bench_guidance.py        # the question once vs per item, ~25 cents

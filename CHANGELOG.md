@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.9.1 (2026-09-20)
+
+A review measured the client's own work rather than the API's and found a third of it going on the
+same `json.dumps` over and over. **Read the numbers below for what they are: this is client overhead,
+which is 0.131ms of a 577ms request, or 0.023%. It does not move the 441 items/s headline by anything
+you could detect.** Where it does matter is the paths that make no API calls at all, which is exactly
+what resuming a checkpoint and answering from cache are.
+
+Per 8,000 items, two runs of `python bench.py --offline --items 8000 --rounds 9`:
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| answering from cache | 72.8ms | **18.5ms** | 3.9x |
+| a cold run, responses mocked | 266.7ms | **136.1ms** | 2.0x |
+| resuming a checkpoint | 210.5ms | **125.2ms** | 1.7x |
+
+### Fixed
+- **The question was serialized once per item, four times over.** `_key` ran `json.dumps` on the
+  criteria and the options every time it was called, and it is called for the cache read, the
+  checkpoint read, the cache write and the checkpoint write: four million of them on a million rows.
+  It is now taken once per call as `_shape`, which is also a smaller interface than passing four
+  arguments to four methods.
+- **A callback could change the question underneath a run, and did.** `criteria` and `options` are the
+  caller's dictionaries, a stream is suspended between answers, and there are always more requests to
+  come than the window holds. Changing one mid-run changed the questions still to be sent, and worse,
+  the items after the change were filed in the cache under the changed question: measured at **1 of 10
+  items** filed under the real one. Both mappings are copied at the start of a call now.
+- `bench.py` counted failures as `client.failures`, which stopped being a number in v0.5.0 and became
+  the list of skipped answers, so the failure column was wrong. It reads `usage.skipped` now. It also
+  ignored `--transport` when building its baseline row, and left a client open between rounds.
+
+### Added
+- `python bench.py --offline --items 8000 --rounds 9`, which measures the client's own work with no
+  provider, no network and no key. It randomises the order of the shapes it measures, takes one
+  untimed round first, and asserts every field of every answer matches across all three shapes, so a
+  faster run that answers differently fails instead of looking good.
+
+Thanks to the reviewer who measured this properly, including the benchmark and the diagnosis. The
+implementation here differs: the question's identity is hoisted once into `_shape` rather than
+threaded through four methods as an optional argument.
+
+96 tests, no key and no network needed.
+
 ## v0.9.0 (2026-09-20)
 
 Throughput is within a fifth of its arithmetic ceiling, so this release is about the other gap.

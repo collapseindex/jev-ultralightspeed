@@ -72,10 +72,9 @@ def corpus(size: int) -> list[str]:
 
 def measure(items, *, pack, workers, transport="auto"):
     """One run, with the connection already open so setup is not in the time."""
-    client = Client(pack=pack, workers=workers, cache=False, transport=transport)
-    client.failures = 0
-    client.warm()
-    answers = client.classify(items, QUESTION, criteria=CRITERIA)
+    with Client(pack=pack, workers=workers, cache=False, transport=transport) as client:
+        client.warm()
+        answers = client.classify(items, QUESTION, criteria=CRITERIA)
     return answers, client
 
 
@@ -93,8 +92,13 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--grid", action="store_true", help="sweep pack x workers")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--offline", action="store_true",
+                        help="measure the client's own work, with no API calls at all")
     parser.add_argument("--transport", default="auto", choices=("auto", "http2", "threads"))
     arguments = parser.parse_args()
+    if arguments.offline:
+        from bench_cpu import measure_local
+        return measure_local(arguments.items, arguments.rounds, arguments.seed)
 
     items = corpus(arguments.items)
     random.seed(arguments.seed)
@@ -126,7 +130,7 @@ def main() -> int:
         time.sleep(0.5)
 
     if not baseline:                       # the grid has no sequential row
-        answers, _ = measure(items, pack=1, workers=1)
+        answers, _ = measure(items, pack=1, workers=1, transport=arguments.transport)
         baseline.update({answer.item: answer.p for answer in answers})
 
     print(f"{'shape':<16}{'items/s':>9}{'reqs':>7}{'tok/item':>10}{'p50 ms':>9}{'p95 ms':>9}"
@@ -139,7 +143,7 @@ def main() -> int:
         tokens = statistics.mean(client.usage.tokens_per_item for _, client in runs)
         requests = statistics.median(client.usage.requests for _, client in runs)
         latencies = [value for _, client in runs for value in client.latencies]
-        failures = sum(client.failures for _, client in runs)
+        failures = sum(client.usage.skipped for _, client in runs)
         same, moved = [], []
         for answers, _ in runs:
             checked = [a for a in answers if a.item in baseline]

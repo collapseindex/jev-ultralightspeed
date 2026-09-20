@@ -1245,8 +1245,10 @@ def test_the_shape_of_the_question_is_part_of_the_key():
     """
     repeated = Fake(pack=4)
     once = Fake(pack=4, guidance="once")
-    assert (repeated._key("t", QUESTION, None, None)
-            != once._key("t", QUESTION, None, None))
+    assert (repeated._shape(QUESTION, None, None) != once._shape(QUESTION, None, None))
+    shape = repeated._shape(QUESTION, None, None)
+    assert repeated._key("t", shape) != repeated._key("u", shape)
+    assert Fake(pack=8)._shape(QUESTION, None, None) != shape, "pack must be in there too"
 
 
 def test_guidance_takes_one_of_two_words():
@@ -1403,3 +1405,40 @@ def test_keeping_nothing_trusts_nothing():
     trusted, review = triage(answers, keep=0.0)
     assert trusted == []
     assert len(review) == 2
+
+
+def test_the_question_cannot_change_underneath_a_run():
+    """
+    A stream is suspended between answers and the caller still holds the
+    dictionaries they passed. Changing one used to change the questions still to
+    be sent, halfway through a job.
+
+    One worker and one item per request, so there are more requests to come than
+    the window holds: with everything already queued, nothing is left to corrupt.
+    """
+    criteria = {"true": "broken now", "false": "can wait"}
+    client = Fake(pack=1, workers=1)
+    client.classify([f"item {n}" for n in range(10)], QUESTION, criteria=criteria,
+                    on_progress=lambda done, total: criteria.update({"true": "CHANGED"}))
+    assert criteria["true"] == "CHANGED", "the callback did not actually run"
+    assert len(client.sent) == 10
+    for body in client.sent:
+        for question in body["questions"].values():
+            assert question["criteria"]["true"] == "broken now", question["criteria"]
+
+
+def test_a_mutated_question_does_not_poison_the_cache_key():
+    """
+    The identity is taken once, from the copy, so the items early in a call and
+    the ones after the callback are remembered under the same key.
+    """
+    original = {"true": "broken now", "false": "can wait"}
+    live = dict(original)
+    items = [f"item {n}" for n in range(10)]
+    client = Fake(pack=1, workers=1)
+    client.classify(items, QUESTION, criteria=live,
+                    on_progress=lambda done, total: live.update({"true": "CHANGED"}))
+    already = client.usage.cached
+    client.classify(items, QUESTION, criteria=dict(original))
+    fresh = client.usage.cached - already
+    assert fresh == len(items), f"only {fresh} of {len(items)} were filed under the real question"

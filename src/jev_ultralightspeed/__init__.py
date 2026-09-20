@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -495,17 +495,24 @@ class Client:
         if not texts:
             return
 
+        # Copied, because a stream is suspended between answers and the caller
+        # holds the same dictionaries. Changing one mid-run would otherwise
+        # change the questions still to be sent, halfway through a job.
+        criteria = dict(criteria) if criteria else criteria
+        options = dict(options) if options else options
+        shape = self._shape(instructions, criteria, options)
+
         answers: list[Answer | None] = [None] * len(texts)
         self.last_partial = []
         ledger = self._ledger_for(checkpoint)
         todo: list[int] = []
         for index, text in enumerate(texts):
-            hit = self._cached(text, instructions, criteria, options)
+            hit = self._cached(text, shape)
             if hit is not None:
                 answers[index] = _copy_answer(hit, text)
                 self.usage.cached += 1
                 continue
-            stored = (ledger.answer_for(self._key(text, instructions, criteria, options), text)
+            stored = (ledger.answer_for(self._key(text, shape), text)
                       if ledger is not None else None)
             if stored is not None:
                 answers[index] = Answer(item=text, p=stored.p, label=stored.label,
@@ -547,7 +554,7 @@ class Client:
         def settle(index: int, answer: Answer) -> None:
             answers[index] = answer
             if answer.ok:
-                self._remember(texts[index], instructions, criteria, options, answer)
+                self._remember(texts[index], shape, answer)
             for copy in copies.get(index, ()):
                 answers[copy] = _copy_answer(answer, texts[copy])
                 if not answer.ok:
@@ -603,7 +610,7 @@ class Client:
                             raise
                         here = [self._gave_up(texts[index], str(error), position, len(group))
                                 for position, index in enumerate(group, start=1)]
-                    self._bank(ledger, group, texts, here, instructions, criteria, options)
+                    self._bank(ledger, group, texts, here, shape)
                     for index, answer in zip(group, here):
                         settle(index, answer)
                     done += len(here)
@@ -759,7 +766,7 @@ class Client:
             groups.append(current)
         return groups
 
-    def _bank(self, ledger, group, texts, answers, instructions, criteria, options) -> None:
+    def _bank(self, ledger, group, texts, answers, shape) -> None:
         """
         Put these answers in the checkpoint. A skipped item is left out on
         purpose: banking "no answer" would make the next run skip it too, and
@@ -769,7 +776,7 @@ class Client:
             return
         for index, answer in zip(group, answers):
             if answer.ok:
-                ledger.record(self._key(texts[index], instructions, criteria, options), answer)
+                ledger.record(self._key(texts[index], shape), answer)
 
     def _ledger_for(self, checkpoint) -> Ledger | None:
         """
@@ -787,26 +794,39 @@ class Client:
         with self._books:
             self.usage.retries += 1
 
-    def _key(self, text: str, instructions: str, criteria, options) -> tuple:
-        # `pack` belongs in here. bench_packing.py measures a 3.3 point spread
-        # by position within a request, so an answer produced at pack=32 is not
-        # the answer you would have got at pack=1, and a cache or a checkpoint
-        # that ignores the depth quietly serves one for the other.
-        return (self.model, self.pack, self.guidance, text, instructions,
+    def _shape(self, instructions: str, criteria, options) -> tuple:
+        """
+        Everything an answer depends on except the item itself, serialized once.
+
+        This used to happen inside `_key`, which is called for the cache read,
+        the checkpoint read, the cache write and the checkpoint write: four
+        `json.dumps` of the same criteria per item, so four million of them on a
+        million rows. Worth about a third of the client's own time.
+
+        `pack` belongs in here. bench_packing.py measures a 3.3 point spread by
+        position within a request, so an answer produced at pack=32 is not the
+        answer you would have got at pack=1, and a cache or a checkpoint that
+        ignores the depth quietly serves one for the other. `guidance` is in for
+        the same reason: a different prompt is a different answer.
+        """
+        return (self.model, self.pack, self.guidance, instructions,
                 json.dumps(criteria, sort_keys=True), json.dumps(options, sort_keys=True))
 
-    def _cached(self, text, instructions, criteria, options) -> Answer | None:
+    def _key(self, text: str, shape: tuple) -> tuple:
+        return (text, *shape)
+
+    def _cached(self, text, shape) -> Answer | None:
         # Asking again is the whole point of dedupe=False, and a cache read is
         # just deduplication with a longer memory.
         if not self.cache_on or not self.dedupe:
             return None
-        return self._cache.get(self._key(text, instructions, criteria, options))
+        return self._cache.get(self._key(text, shape))
 
-    def _remember(self, text, instructions, criteria, options, answer: Answer) -> None:
+    def _remember(self, text, shape, answer: Answer) -> None:
         if not self.cache_on or not self.dedupe:
             return
         # A copy: what the caller was handed is theirs to mutate.
-        self._cache[self._key(text, instructions, criteria, options)] = _copy_answer(answer, text)
+        self._cache[self._key(text, shape)] = _copy_answer(answer, text)
         while len(self._cache) > 10_000:                 # bounded, oldest first
             self._cache.popitem(last=False)
 
