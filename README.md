@@ -4,18 +4,25 @@
 
 <img src="docs/infographic.png" alt="18x faster, 41% cheaper, same accuracy: 739 items a second against 41, and a million decisions in 14.7 minutes for $4.99" width="100%" />
 
-**A million decisions in 14.7 minutes for $4.99, with zero errors.** One request per item, one at a
-time, would take about 41 hours and cost three times as much.
-
-Classify a pile of items with [TypeSafe's Jev](https://typesafe.ai). Not affiliated with TypeSafe;
-the hedgehog is a parody and belongs to nobody.
+**You have a pile of text and one question about each.** Fifty thousand support tickets to triage.
+A quarter of reviews to sort by sentiment. A month of logs to flag. A column to backfill on a table
+you already have. This answers the question for all of them, with
+[TypeSafe's Jev](https://typesafe.ai), in the time it takes to get a coffee.
 
 ```python
 from jev_ultralightspeed import classify
 
-answers = classify(messages, "Does this message need a human today?")
+answers = classify(tickets, "Does this message need a human to act on it today?")
 urgent = [a.item for a in answers if a.yes]
 ```
+
+**A million decisions in 14.7 minutes for $4.99, with zero errors.** One request per item, one at a
+time, would take about 41 hours and cost three times as much.
+
+**Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
+makes a single item slower, not faster. This is for a queue.
+
+Not affiliated with TypeSafe; the hedgehog is a parody and belongs to nobody.
 
 ## A million items
 
