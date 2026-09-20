@@ -1090,8 +1090,18 @@ def test_the_readme_states_the_number_of_tests_there_are(request):
 
 # -- the fast path, over real HTTP/2 ----------------------------------------
 
+_TLS_EXCUSE = None          # worked out once per session, against a throwaway server
+
+
 def an_h2_server():
-    """The h2 fixture, or a skip saying why it cannot be used here."""
+    """
+    The h2 fixture, or a skip saying why it cannot be used here.
+
+    The interception check opens a connection of its own, without ALPN, and the
+    thread that would record it can be scheduled after a reset, so it is done
+    against a server that is then thrown away. Once per session.
+    """
+    global _TLS_EXCUSE
     from jev_ultralightspeed import _http2
 
     if not _http2.available():
@@ -1100,12 +1110,15 @@ def an_h2_server():
         from h2_server import H2Server, client_context, intercepted
     except ImportError as error:                    # cryptography or h2 missing
         pytest.skip(f"the h2 fixture needs {error.name}; it comes with .[dev]")
+    if _TLS_EXCUSE is None:
+        throwaway = H2Server()
+        try:
+            _TLS_EXCUSE = intercepted(throwaway)
+        finally:
+            throwaway.close()
+    if _TLS_EXCUSE:
+        pytest.skip(_TLS_EXCUSE)
     server = H2Server()
-    excuse = intercepted(server)
-    if excuse:
-        server.close()
-        pytest.skip(excuse)
-    server.reset()          # the check above connected too, and without ALPN
     return server, client_context(server.ca_path)
 
 
