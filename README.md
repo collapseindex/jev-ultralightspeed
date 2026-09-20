@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.1.1** · Apache-2.0 · no required dependencies
+**v0.2.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Faster, cheaper, same accuracy: hundreds of items a second against dozens, with agreement against human labels unchanged" width="100%" />
 
@@ -16,8 +16,9 @@ answers = classify(tickets, "Does this message need a human to act on it today?"
 urgent = [a.item for a in answers if a.yes]
 ```
 
-**15.9x the throughput of one request per item, 41% less money, and the same accuracy.** Measured
-over 30,000 judgements against human labels, in one run, with a script in this repository.
+**26.5x the throughput of one request per item, for 41% less money, with no accuracy difference
+this benchmark can detect.** Measured over 30,000 judgements against human labels, both arms under
+TypeSafe's published rate limit, with a script in this repository.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
@@ -29,50 +30,73 @@ Not affiliated with TypeSafe; the hedgehog is a parody and belongs to nobody.
 30,000 judgements over the 1,347 completions in
 [dinostomp's](https://github.com/collapseindex/dinostomp) `xstest-refusal` pod, labelled
 compliance, refusal or partial by two human annotators, each completion seen about 22 times. Two
-arms, identical but for the shape of the requests. This is not Jev against another model: it is
-**jev-1.13.0 against itself**, same question, same items, same criteria.
+arms, identical but for the shape of the requests, both holding under TypeSafe's published ceiling
+of 1,200 requests a minute. This is not Jev against another model: it is **jev-1.13.0 against
+itself**, same question, same items, same criteria, same machine.
 
 | | regular jev | jev + ultralightspeed |
 | --- | ---: | ---: |
-| throughput | 41.1 items/s | **653.4 items/s** |
-| wall clock | 12 min 11 s | **46 seconds** |
+| throughput | 16.7 items/s | **441.0 items/s** |
+| wall clock | 30 minutes | **68 seconds** |
 | requests | 30,000 | 942 |
 | cost | $0.729 | **$0.430** |
-| agreement with the human labels | 89.3% (89.0 to 89.7) | **89.2% (88.9 to 89.6)** |
-| same answer across an item's repeats | 99.6% | 98.0% |
+| agreement with the human labels | 89.3% (87.5 to 90.8) | 89.2% (87.5 to 90.7) |
+| same answer across an item's repeats | 99.6% | 98.1% |
 | failed | 0 | 0 |
-| retried | 1 | 63 |
+| retried | 1 | 245 |
 
-**15.9x the throughput, 41% less money, and the accuracy is the same**: 89.3% against 89.2%, with
-30,000 judgements behind each figure and the intervals sitting on top of each other.
+**26.5x the throughput and 41% less money.** On accuracy, the honest statement is a paired one:
+over the 1,347 completions, packed minus one-per-request is **−0.09 points, 95% interval −0.83 to
++0.61**, which sits inside a two point margin. That is "no difference worth caring about at this
+sample size", not proof of equivalence.
 
 ```bash
+pip install "jev-ultralightspeed[fast]"
 git clone https://github.com/collapseindex/jev-ultralightspeed.git
 git clone https://github.com/collapseindex/dinostomp.git
-cd jev-ultralightspeed && pip install "jev-ultralightspeed[fast]"
-TYPESAFE_API_KEY=... python bench_eval.py            # about 13 minutes, about $1.20
+cd jev-ultralightspeed
+TYPESAFE_API_KEY=... python bench_eval.py            # about 35 minutes, about $1.20
 ```
 
-Three things in that table are worth reading twice.
+### Why the baseline is slow, and why that is the point
 
-**The baseline is not slow.** It is one item per request with the same eight requests in flight, so
-the 15.9x is against a client that is already parallel. Against an actual sequential loop it is far
-larger and far less interesting.
+**The ceiling counts requests, not items.** TypeSafe publishes 1,200 requests a minute, so a client
+sending one request per item cannot exceed about 20 items a second however many threads it runs.
+That is arithmetic, not a slow client: the baseline here sits at 16.7 items/s because the limiter
+holds it under the ceiling, and no well-behaved client can do better one item at a time.
 
-**Sixty-three retries, and nothing failed.** Packing 32 deep with 8 in flight does hit transient
-limits at volume. The client backs off and sends them again, which is why this arm came in at 653
-items/s rather than the 800 it reaches on short bursts. Retries are counted in `usage.retries`, so
-this is a number rather than an absence of complaints.
+Packing is the only way past it. Thirty-two items in one request spends one unit of the budget
+instead of thirty-two, which is why the packed arm reaches 441 items/s while making a thirtieth of
+the requests.
 
-**Aggregate accuracy is identical; individual answers are slightly less repeatable.** Ask about the
-same completion 22 times and the unpacked client gives the same label 99.6% of the time, the packed
-one 98.0%. So pack freely when you want the total, and keep the pack size fixed when you are
-comparing item by item across runs.
+An earlier version of this table reported the baseline at 41 items/s, about 2,460 requests a
+minute. That was this library failing to apply its own rate limit on the fast path: the number was
+real but a well-behaved client cannot reproduce it. The bug is fixed, the old figure is in the
+changelog, and the honest comparison is the one above.
+
+### Three more things in that table
+
+**The intervals are clustered, not binomial.** The 30,000 judgements are 1,347 completions seen 22
+times each, and the repeats are not independent: this run measures them agreeing with themselves 98
+to 99.6% of the time. Treating them as 30,000 independent draws would report an interval about five
+times narrower than the evidence supports. `bench_eval.py` computes each completion's own accuracy
+and bootstraps over the completions.
+
+**245 retries against the baseline's 1.** The packed arm made 942 requests in 68 seconds, well
+under the request ceiling, and still got pushed back. That points at a limit counted in tokens
+rather than requests, which packing 32 deep runs into hard. Nothing failed: the client backs off
+with jitter, honours `Retry-After`, and frees its slot while it waits. Retries are counted in
+`usage.retries`, so this is a number rather than an absence of complaints.
+
+**Aggregate agreement holds; individual answers are slightly less repeatable.** Ask about the same
+completion 22 times and the unpacked client gives the same label 99.6% of the time, the packed one
+98.1%. Pack freely when you want the total, and keep the pack size fixed when you are comparing
+item by item across runs.
 
 Shorter items do better than this on every axis, because the per-item text is a smaller share of
-each request: a million synthetic support messages (138 tokens each) ran at 1,135 items/s, 14.7
-minutes and $4.99 for the lot, over 31,400 requests with nothing retried. `soak.py --items 1000000`
-reproduces that, and it is a different corpus, so it is a footnote here rather than a headline.
+each request: a million synthetic support messages (138 tokens each) ran at 1,135 items/s in 14.7
+minutes for $4.99, over 31,400 requests with nothing retried. `soak.py --items 1000000` reproduces
+that, and it is a different corpus, so it is a footnote here rather than a headline.
 
 ## How
 

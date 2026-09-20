@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.2.0 (2026-09-20)
+
+### Fixed
+- **The rate limit never reached the fast path.** `_limiter.take()` was called only by the threaded
+  client, so the ceiling the README and SECURITY.md both promised applied to the transport almost
+  nobody used. Every benchmark before this one was therefore measured at about 2,460 requests a
+  minute, double TypeSafe's published 1,200: real numbers that a well-behaved client cannot
+  reproduce. Both paths now hold the same ceiling, and the table has been remeasured.
+- A request waiting out a 429 held one of the few in-flight slots while doing nothing; the waiting
+  now happens outside the semaphore.
+- Retries had no jitter and ignored `Retry-After`, so workers backed off together and collided
+  again. The server's hint wins, otherwise it is doubling with jitter.
+- One bad answer cancelled its siblings mid-flight, so a long run could return nothing having spent
+  the money anyway. Every request now runs to its own end.
+- `warm()` opened connections in a throwaway pool's thread locals and destroyed it, warming nothing
+  and leaking connections per chunk. One pool now lives as long as the client.
+- An async caller was silently given the threaded path while `transport` still said http2; it
+  refuses with an instruction instead.
+- A missing answer shortened the returned list rather than failing, quietly breaking the documented
+  order guarantee.
+- Cached and deduplicated answers shared one mutable distribution dict, in two places.
+- `usage` was incremented from worker threads and the loop thread without a lock.
+- The one-call `classify()` never closed its client.
+
+### Changed
+- **The accuracy comparison is paired and clustered.** Wilson intervals on 30,000 judgements
+  treated 22 repeats of 1,347 completions as independent, reporting an interval about five times
+  narrower than the evidence supports. `bench_eval.py` now computes each completion's own accuracy,
+  bootstraps over the completions, and reports the paired difference: −0.09 points, 95% −0.83 to
+  +0.61, inside a two point margin. "No difference this benchmark can detect", not "same accuracy".
+- `stream()` says what it does: chunking, not answers handed back the moment each lands.
+
+### Added
+- SECURITY.md covers packing as an attack surface: thirty-two items share one context, a hostile
+  item can address the others, and aggregate accuracy is the measurement least likely to notice.
+- A CI job that installs the `[fast]` extra and asserts the HTTP/2 path is the one selected.
+- Tests for all of the above, 26 in total.
+
 ## v0.1.1 (2026-09-20)
 
 ### Fixed
