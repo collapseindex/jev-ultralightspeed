@@ -50,6 +50,10 @@ over the 1,347 completions, packed minus one-per-request is **−0.09 points, 95
 +0.61**, which sits inside a two point margin. That is "no difference worth caring about at this
 sample size", not proof of equivalence.
 
+**89% is not 89% of a perfect score.** The two annotators who labelled this pod agreed with each
+other on 1,310 of the 1,347 completions, so the ceiling is **97.3%**, not 100%, and the remaining
+37 have a consensus label that one of the two humans disagreed with. Read both arms against that.
+
 ```bash
 pip install "jev-ultralightspeed[fast]"
 git clone https://github.com/collapseindex/jev-ultralightspeed.git
@@ -232,7 +236,7 @@ the order you passed the items in, however the requests were shuffled to get the
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 36 tests, a local server, no key needed, no key needed
+python -m pytest tests -q        # 43 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents

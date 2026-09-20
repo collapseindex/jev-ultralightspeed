@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.3.2 (2026-09-20)
+
+Both fixes here are the same shape as the last release's: something that worked on the threaded
+path and quietly did nothing on the fast one. The tests are the real change. Every behavioural test
+now runs on both transports through one `both_transports` decorator, against a threading server on
+loopback, so a whole transport can no longer go unchecked. Stashing this release's source and
+running the new tests against the old confirms they fail on `[http2]` and pass on `[threads]`,
+which is exactly the shape of the blind spot.
+
+### Fixed
+- **`on_progress` reported nothing until the run was over on the fast path.** Progress was reported
+  while reading the payloads, which happens after every request has already landed, so a progress
+  bar went from nothing to done in one step. `Pipe.ask_all` now takes a per-request callback that
+  fires as each request lands. Measured over 40 items at 300ms each: the first report used to
+  arrive at 3.099s of 3.100s, and now arrives at **0.478s of 3.268s**. It runs on the pipe's loop
+  thread, which is documented on `classify`.
+- **`last_partial` was a different type on each transport.** The fast path handed back surviving
+  raw payloads with the failures filtered out, so there was no way to tell which items they
+  answered; the threaded path handed back `list[Answer]`. `gather` now keeps each payload's index,
+  so survivors are matched back to their own items and both paths return `list[Answer]`. An
+  unreadable group is dropped rather than raising over the error already on its way up.
+- **`warm()` on the fast path skipped the rate limiter.** A client that warmed up was one request
+  over its own budget before any work arrived. The warm-up now takes a slot like anything else.
+
+### Changed
+- The README reads 89% against a ceiling rather than against 100%: the pod's two annotators agreed
+  with each other on 1,310 of 1,347 completions, so **97.3%** is the number both arms sit under.
+
+Thanks to the reviewers who found the first two. Neither was reachable from the old suite.
+
 ## v0.3.1 (2026-09-20)
 
 A review reproduced two of the last two releases' headline fixes not working. Both reproduce, both

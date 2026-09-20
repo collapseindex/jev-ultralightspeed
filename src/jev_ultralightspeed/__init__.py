@@ -38,7 +38,7 @@ from typing import Callable, Iterable, Sequence
 
 from . import _http2
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -350,6 +350,10 @@ class Client:
 
         `criteria` says what true and false mean for a yes/no question;
         `options` turns it into a pick-one question over those names.
+
+        `on_progress(done, total)` is called as each request lands, which on the
+        fast transport means from a background thread. Keep it cheap, and lock
+        anything it touches.
         """
         texts = [_clean(item, index) for index, item in enumerate(items)]
         if not texts:
@@ -387,19 +391,39 @@ class Client:
             # One connection, every request in flight on it.
             bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
                       for g in groups]
-            payloads = self._pipe_for().ask_all(
-                bodies, on_request=self._count, on_timing=self._note_latency,
-                on_retry=self._count_retry,
-                on_failure=lambda done: setattr(self, "last_partial", done))
-            for group, data in zip(groups, payloads):
-                for position, index in enumerate(group, start=1):
-                    answer = _read(self._entry(data, position), texts[index],
-                                   position, len(group))
-                    answers[index] = answer
-                    self._remember(texts[index], instructions, criteria, options, answer)
-                done += len(group)
+
+            def group_answers(which: int, data: dict) -> list[Answer]:
+                group = groups[which]
+                return [_read(self._entry(data, position), texts[index], position, len(group))
+                        for position, index in enumerate(group, start=1)]
+
+            def finished(which: int) -> None:
+                # Called from the loop thread as each request lands, so progress
+                # arrives while the work does rather than all at the end.
+                nonlocal done
+                done += len(groups[which])
                 if on_progress:
                     on_progress(done, len(unique))
+
+            def salvage(arrived) -> None:
+                # What survived a failed run, as answers against their own items.
+                # A malformed payload here must not replace the error already on
+                # its way up, so an unreadable group is dropped instead.
+                kept: list[Answer] = []
+                for which, data in arrived:
+                    try:
+                        kept.extend(group_answers(which, data))
+                    except (JevError, KeyError, TypeError, ValueError):
+                        continue
+                self.last_partial = kept
+
+            payloads = self._pipe_for().ask_all(
+                bodies, on_request=self._count, on_timing=self._note_latency,
+                on_retry=self._count_retry, on_failure=salvage, on_done=finished)
+            for which, data in enumerate(payloads):
+                for index, answer in zip(groups[which], group_answers(which, data)):
+                    answers[index] = answer
+                    self._remember(texts[index], instructions, criteria, options, answer)
         elif groups:
             pool = self._pool_for()
             for group, result in zip(groups, pool.map(

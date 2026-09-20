@@ -172,7 +172,7 @@ class Pipe:
             await asyncio.sleep(wait)               # the slot is free while this waits
         raise JevError("out of retries")
 
-    async def _all(self, bodies, on_request, on_timing, on_retry, on_failure) -> list[dict]:
+    async def _all(self, bodies, on_request, on_timing, on_retry, on_failure, on_done) -> list[dict]:
         """
         Every request runs to its own end rather than being cancelled by a
         sibling, but a run that is plainly doomed is abandoned early: a wrong
@@ -181,35 +181,41 @@ class Pipe:
         """
         run = _Run()                    # per call, so two callers cannot stomp each other
 
-        async def one(body):
+        async def one(index, body):
             try:
-                return await self._one(body, run, on_request, on_timing, on_retry)
+                answer = await self._one(body, run, on_request, on_timing, on_retry)
+                if on_done:
+                    on_done(index)          # while the rest are still in flight
+                return answer
             except Exception as error:
                 run.failures += 1
                 if run.failures >= GIVE_UP_AFTER and not run.broken:
                     run.broken = f"abandoned after {run.failures} failures, the first being: {error}"
                 raise
 
-        answers = await asyncio.gather(*(one(body) for body in bodies), return_exceptions=True)
-        done = [a for a in answers if not isinstance(a, BaseException)]
+        answers = await asyncio.gather(*(one(index, body) for index, body in enumerate(bodies)),
+                                       return_exceptions=True)
+        arrived = [(index, answer) for index, answer in enumerate(answers)
+                   if not isinstance(answer, BaseException)]
         for answer in answers:
             if isinstance(answer, BaseException):
                 if on_failure:
-                    on_failure(done)             # hand back what did arrive
+                    on_failure(arrived)      # with their indices, so they can be placed
                 raise answer
         return list(answers)
 
     # -- from ordinary code ------------------------------------------------
     def ask_all(self, bodies: Sequence[dict], *, on_request: Callable | None = None,
                 on_timing: Callable | None = None, on_retry: Callable | None = None,
-                on_failure: Callable | None = None) -> list[dict]:
+                on_failure: Callable | None = None, on_done: Callable | None = None) -> list[dict]:
         future = asyncio.run_coroutine_threadsafe(
-            self._all(bodies, on_request, on_timing, on_retry, on_failure), self._loop)
+            self._all(bodies, on_request, on_timing, on_retry, on_failure, on_done), self._loop)
         return future.result()
 
     def warm(self) -> None:
-        """Open the connection before any work arrives."""
+        """Open the connection before any work arrives, on the same budget."""
         async def touch():
+            await self._wait_for_the_ceiling()      # a request is a request
             try:
                 await self._client.get(self.url)          # a 404 or 405 is fine: it connects
             except Exception:

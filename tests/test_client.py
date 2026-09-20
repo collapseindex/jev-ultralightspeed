@@ -363,6 +363,11 @@ def test_latencies_do_not_grow_forever():
     assert len(client.latencies) == MAX_LATENCIES
 
 
+# Every behavioural test runs on both. The fast path carries its own requests,
+# so a test that only ever sees `threads` is how a whole transport goes unchecked.
+both_transports = pytest.mark.parametrize("transport", ["threads", "http2"])
+
+
 class Counting:
     """A server that refuses everything and counts what it was asked."""
 
@@ -396,7 +401,7 @@ class Counting:
         self.server.shutdown()
 
 
-@pytest.mark.parametrize("transport", ["threads", "http2"])
+@both_transports
 def test_a_doomed_run_is_abandoned_rather_than_sent_in_full(transport):
     """
     The count is the test. A wrong key used to cost every request on the fast
@@ -416,6 +421,155 @@ def test_a_doomed_run_is_abandoned_rather_than_sent_in_full(transport):
         client.close()
         server.close()
     assert server.seen <= 24, f"{server.seen} of 200 requests went out after the run was doomed"
+
+
+class Answering:
+    """
+    A real server on loopback that answers properly, slowly, and can be told to
+    start failing. The HTTP/2 path carries its own requests, so this is the only
+    way to test it the way a caller sees it.
+    """
+
+    def __init__(self, delay=0.0, fail_after=None):
+        # Threading, and it has to be: keep-alive on a single-threaded server
+        # serializes the workers, so the concurrency under test disappears and
+        # the run deadlocks instead of failing.
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import json as _json
+        import threading as _threading
+
+        self.seen = 0
+        self.warmed = 0
+        self.lock = _threading.Lock()
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                asked = _json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
+                with server.lock:
+                    server.seen += 1
+                    number = server.seen
+                if delay:
+                    time.sleep(delay)
+                if fail_after is not None and number > fail_after:
+                    return self.answer(401, {"detail": "no"})
+                answers = {name: {"type": "noul", "noul": 0.8} for name in asked["state"]
+                           if name != "question"}
+                self.answer(200, {"model": "jev-1.13.0", "answers": answers,
+                                  "usage": {"input_tokens": 10, "output_tokens": 1}})
+
+            def do_GET(self):
+                with server.lock:
+                    server.warmed += 1
+                self.answer(405, {"detail": "post only"})   # connecting is the point
+
+            def answer(self, status, payload):
+                body = _json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1/systemone"
+        _threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def a_real_client(url, transport, **kwargs):
+    from jev_ultralightspeed import _http2
+
+    if transport == "http2" and not _http2.available():
+        pytest.skip("httpx not installed")
+    return Client(key="test-key", url=url, transport=transport, **kwargs)
+
+
+@both_transports
+def test_progress_arrives_while_the_work_does(transport):
+    """
+    It used to fire on the fast path only after every request had landed, which
+    is a progress bar that jumps from nothing to done. The gap is the test.
+    """
+    server = Answering(delay=0.08)
+    client = a_real_client(server.url, transport, pack=1, workers=2)
+    seen = []
+    try:
+        answers = client.classify([f"item {n}" for n in range(8)], QUESTION,
+                                  on_progress=lambda done, total: seen.append(
+                                      (done, total, time.monotonic())))
+        finished = time.monotonic()
+    finally:
+        client.close()
+        server.close()
+
+    assert len(answers) == 8
+    assert [done for done, _, _ in seen] == sorted(done for done, _, _ in seen)
+    assert seen[-1][0] == seen[-1][1] == 8
+    assert finished - seen[0][2] >= 0.05, "every report arrived after the work was over"
+
+
+@both_transports
+def test_what_arrived_before_a_failure_is_kept_as_answers(transport):
+    """
+    On the fast path `last_partial` used to be raw payloads with no way to tell
+    which item each one answered. Both paths now hand back the same thing.
+    """
+    server = Answering(fail_after=6)
+    client = a_real_client(server.url, transport, pack=1, workers=4)
+    items = [f"item {n}" for n in range(60)]
+    try:
+        with pytest.raises(JevError):
+            client.classify(items, QUESTION)
+    finally:
+        client.close()
+        server.close()
+
+    assert client.last_partial, "nothing was kept from a run that half worked"
+    assert all(isinstance(answer, Answer) for answer in client.last_partial)
+    assert all(answer.item in items for answer in client.last_partial)
+    assert len({answer.item for answer in client.last_partial}) == len(client.last_partial)
+
+
+@both_transports
+def test_a_packed_run_against_a_real_server_keeps_its_order(transport):
+    """The fast path, end to end, with no fake in the way."""
+    server = Answering()
+    client = a_real_client(server.url, transport, pack=4, workers=2)
+    try:
+        answers = client.classify([f"item {n}" for n in range(10)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+
+    assert [answer.item for answer in answers] == [f"item {n}" for n in range(10)]
+    assert [answer.position for answer in answers] == [1, 2, 3, 4, 1, 2, 3, 4, 1, 2]
+    assert client.usage.requests == 3
+    assert client.usage.input_tokens == 30
+
+
+def test_warming_the_fast_path_costs_a_request_on_the_budget():
+    """
+    A warm-up is a real request. It used to skip the limiter, so a client that
+    warmed up was already one over its own ceiling before any work arrived.
+    """
+    server = Answering()
+    client = a_real_client(server.url, "http2", pack=1, workers=2)
+    try:
+        client.warm()
+        assert server.warmed == 1, "nothing connected"
+        assert len(client._limiter._recent) == 1, "the warm-up was not on the budget"
+    finally:
+        client.close()
+        server.close()
 
 
 def test_turning_off_dedupe_also_turns_off_the_cache():
