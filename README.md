@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.10.2** · Apache-2.0 · no required dependencies
+**v0.10.3** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -131,17 +131,39 @@ about 1.7x**. Treat 26.5x as the number most likely to move on someone else's ac
 the one that will not. Nothing failed either way: the client backs off with jitter, honours
 `Retry-After` as a floor with jitter on top, and frees its slot while it waits.
 
-**How much room is left, arithmetically.** At `pack=32` and the default 1,000 requests a minute, the
-request-only ceiling is **533 items/s** before retries, token limits or latency. The measured 441 is
-21% below that, so there is no 10x hiding in the transport: one connection, one loop and better
-scheduling are within a fifth of the arithmetic. Another large jump has to come from fewer tokens
-per judgement, more items per request, or a higher allocation, not from polishing the client.
+**How much room is left, and what is actually in the way.** At `pack=32` and the default 1,000
+requests a minute the ceiling is **533 items/s**, and the measured 441 is 21% below it. That gap is
+not the transport and not concurrency. It is the 245 retries: 942 successful requests in 68 seconds
+is 831 a minute, and the shortfall against 1,000 is the time spent waiting out pushback.
 
 | pack | items/s ceiling at 1,000 requests a minute |
 | ---: | ---: |
 | 8 | 133 |
 | 32 | 533 |
 | 64 | 1,067 |
+
+**Four requests in flight is enough to reach that ceiling**, which was worth measuring because the
+arithmetic looked like it said otherwise. Dividing the headline run's 68 seconds by its 942 requests
+and 8 workers gives 577ms, and 4 workers at 577ms would allow only 416 requests a minute, 42% of the
+ceiling. That reasoning is wrong: 577ms is wall clock divided by workers, which folds in every retry
+wait, not the latency of a request. Measured directly, at `pack=32` over 40 requests an arm:
+
+| workers | p50 latency | what that latency allows | burst measured |
+| ---: | ---: | ---: | ---: |
+| **4** | **202ms** | **1,191 req/min** | 993 |
+| 8 | 270ms | 1,777 | 1,510 |
+| 12 | 327ms | 2,201 | 2,017 |
+| 16 | 337ms | 2,845 | 2,485 |
+| 24 | 480ms | 3,000 | 2,616 |
+
+So the default of four is not holding anything back, and more of them buy burst rather than sustained
+throughput, because sustained is what the limiter allows and nothing else. They are also not free:
+latency more than doubles between 4 and 24, so the service is queueing, and the arithmetic that says
+twenty-four workers are six times four is wrong by about 60%. Raise `workers` if you have raised
+`requests_per_minute`; otherwise leave it. `bench_workers.py` reruns this for about ten cents.
+
+Those burst figures are above the ceiling because forty requests cannot fill a sixty second window.
+No number in that table is a sustained rate, and none of them had a single retry.
 
 It is also not compute-bound. At 441 items/s and 341 tokens an item it is moving roughly 600 KB/s of
 JSON, so `orjson`, `uvloop` and more cores have nothing to do here. Every remaining lever is about
@@ -250,7 +272,7 @@ it is not: `p` is the probability of **yes**, so 0.01 is a confident no. Rank by
 | argument | default | what it does |
 | --- | --- | --- |
 | `pack` | 32 | items per request, and the whole ballgame: it decides how many items one unit of the rate limit buys. Raised from 8 in v0.10.0 on the measurement in [What to set](#what-to-set). Use `pack=1` for adversarial text. |
-| `workers` | 4 | requests in flight. |
+| `workers` | 4 | requests in flight. Measured to be enough to reach the default ceiling on its own; more buy burst, not sustained throughput, and latency more than doubles between 4 and 24. Raise it if you raise `requests_per_minute`. |
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
 | `paced` | False | spread requests evenly instead of letting a minute's worth go at once. Only useful against a service that throttles short bursts, and see below before turning it on. |
@@ -575,6 +597,7 @@ python -m pytest tests -q        # 111 tests, a local server, no key and no netw
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls
+TYPESAFE_API_KEY=... python bench_workers.py         # latency against concurrency, ~10 cents
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
 TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
 TYPESAFE_API_KEY=... python bench_guidance.py        # the question once vs per item, ~25 cents

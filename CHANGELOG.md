@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.10.3 (2026-09-20)
+
+No library change. A measurement, and a derivation of mine that it corrected before it reached the
+README.
+
+### Added
+- `bench_workers.py`, which measures latency against concurrency for about ten cents. It needs latency
+  rather than volume, so forty requests an arm is enough.
+
+### Corrected
+- **Four requests in flight is enough to reach the default ceiling.** I had worked out that it was
+  not. Dividing the headline run's 68 seconds by its 942 requests and 8 workers gives 577ms, and 4
+  workers at 577ms would allow 416 requests a minute, 42% of the 1,000 the limiter permits. That
+  reasoning is wrong, because 577ms is wall clock over workers and folds in every retry wait rather
+  than being the latency of a request. Measured at `pack=32`:
+
+  | workers | p50 latency | what that latency allows | burst measured |
+  | ---: | ---: | ---: | ---: |
+  | **4** | **202ms** | **1,191 req/min** | 993 |
+  | 8 | 270ms | 1,777 | 1,510 |
+  | 12 | 327ms | 2,201 | 2,017 |
+  | 16 | 337ms | 2,845 | 2,485 |
+  | 24 | 480ms | 3,000 | 2,616 |
+
+  So the default holds nothing back, and it stays 4. More workers buy burst rather than sustained
+  throughput, because sustained is whatever the limiter allows and nothing else. They are also not
+  free: latency more than doubles between 4 and 24, so the service queues, and the arithmetic that
+  says twenty-four workers are six times four is out by about 60%.
+- **The 21% between 441 items/s and the 533 ceiling is the retries**, not the transport and not
+  concurrency. 942 successful requests in 68 seconds is 831 a minute, and the shortfall against 1,000
+  is time spent waiting out pushback. Which is what `paced=True` is aimed at, and still not evidence
+  that pacing would have helped, since nothing in today's runs produced a single retry to pace away.
+
+111 tests, no key and no network needed.
+
 ## v0.10.2 (2026-09-20)
 
 Three things reproduced from a review, all of them introduced earlier today, all of them in the parts
