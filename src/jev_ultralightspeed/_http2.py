@@ -17,11 +17,12 @@ them per call costs more than the multiplexing saves.
 from __future__ import annotations
 
 import asyncio
+import datetime
+import email.utils
 import random
 import ssl
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Sequence
 
 try:                                        # optional, and checked before use
@@ -41,21 +42,48 @@ def available() -> bool:
     return True
 
 
-# How many failures before a run is abandoned rather than sending the rest.
+KEEPALIVE_S = 60.0              # httpx drops an idle connection after 5s by default, which
+                                # makes every call in an intermittent job pay the handshake
+ADMIT_SLICE_S = 0.25            # how long to wait for room before looking up again
+MAX_WAIT_S = 60.0               # nothing waits longer than this on one attempt
+HINT_JITTER_S = 1.0             # spread on top of the server's own number
+
+
+def _retry_after_seconds(hint: str | None) -> float | None:
+    """
+    Seconds out of a Retry-After header, which RFC 9110 allows to be either a
+    count or an HTTP date. Only the count was understood before, so a server
+    answering with a date was treated as having said nothing.
+    """
+    if not hint:
+        return None
+    hint = hint.strip()
+    try:
+        return max(0.0, float(hint))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(hint)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:                         # a date without a zone is UTC
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
 
 
 def _backoff(attempt: int, retry_after: str | None) -> float:
     """
-    How long to wait. The server's own Retry-After wins; otherwise doubling
-    with jitter, because eight workers backing off on the same schedule
-    collide again by construction.
+    How long to wait. The server's own Retry-After is a minimum rather than an
+    answer: every worker given the same hint would otherwise come back at the
+    same instant, so jitter goes on top of it, never underneath. Without a hint,
+    doubling with jitter.
     """
-    if retry_after:
-        try:
-            return max(0.0, min(60.0, float(retry_after)))
-        except ValueError:
-            pass                                    # a date, not seconds: fall through
-    return min(30.0, 2 ** attempt) * (0.5 + random.random())
+    hint = _retry_after_seconds(retry_after)
+    if hint is not None:
+        return min(MAX_WAIT_S, hint + random.random() * HINT_JITTER_S)
+    return min(MAX_WAIT_S, min(30.0, 2 ** attempt) * (0.5 + random.random()))
 
 
 def in_a_loop() -> bool:
@@ -95,25 +123,38 @@ class Pipe:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
         self._gate: asyncio.Semaphore | None = None
-        self._waiters = ThreadPoolExecutor(max_workers=max(2, self.inflight),
-                                           thread_name_prefix="jev-limit")
         self._thread = threading.Thread(target=self._run, name="jev-http2", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=10)
 
     # -- the loop ----------------------------------------------------------
-    async def _wait_for_the_ceiling(self) -> None:
+    async def _admit(self, run=None) -> None:
         """
-        The limiter blocks, so it waits on this pipe's own threads rather than
-        the default executor, which belongs to whoever imported us.
+        Wait for room under the request ceiling.
+
+        Two things matter here. The permit is taken immediately before the send,
+        so what the limiter records is when the request actually went out rather
+        than when some coroutine first thought about it: with a hundred bodies
+        and two slots, every permit used to be spent by the third send. And the
+        wait happens in slices, so a run that has been abandoned stops waiting
+        instead of draining its whole queue of permits first.
         """
-        await self._loop.run_in_executor(self._waiters, self.limiter.take)
+        from . import JevError                   # here, to keep the import one-way
+
+        while True:
+            if run is not None and run.broken:
+                raise JevError(run.broken)
+            wait = self.limiter.try_take()
+            if wait <= 0.0:
+                return
+            await asyncio.sleep(min(wait, ADMIT_SLICE_S))
 
     def _run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         limits = httpx.Limits(max_connections=self.inflight,
-                              max_keepalive_connections=self.inflight)
+                              max_keepalive_connections=self.inflight,
+                              keepalive_expiry=KEEPALIVE_S)
         # Trust the same certificates the standard library does, which means the
         # operating system's store. httpx would otherwise trust only certifi's
         # bundle, and fail on any machine whose TLS is inspected by a proxy or
@@ -141,12 +182,12 @@ class Pipe:
             wait = None
             # The ceiling is taken before the slot, so a request waiting for
             # the rate limit is not sitting on one of the few in-flight slots.
-            await self._wait_for_the_ceiling()
             async with self._gate:
                 # Checked again, and this is the one that matters: every
                 # coroutine passed the check above before anything had failed.
                 if run.broken:
                     raise JevError(run.broken)
+                await self._admit(run)          # the permit and the send are one moment
                 started = time.monotonic()
                 try:
                     answer = await self._client.post(self.url, json=body)
@@ -228,7 +269,7 @@ class Pipe:
     def warm(self) -> None:
         """Open the connection before any work arrives, on the same budget."""
         async def touch():
-            await self._wait_for_the_ceiling()      # a request is a request
+            await self._admit()                     # a request is a request
             try:
                 await self._client.get(self.url)          # a 404 or 405 is fine: it connects
             except Exception:
@@ -246,5 +287,4 @@ class Pipe:
             pass
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
-        self._waiters.shutdown(wait=False)
         self._loop = None

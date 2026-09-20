@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.6.0 (2026-09-20)
+
+A scheduling review found that waiting was the problem in four separate places: waiting for a
+straggler, waiting for permits nobody would use, waiting to notice an error, and not waiting at all
+where a token limit needed respecting. Every number below is reproduced by a test that fails on
+v0.5.0.
+
+### Fixed
+- **A copy of a skipped item claimed to have an answer.** `_copy_answer` left `error` behind, so the
+  second of two identical rows came back with `ok` True, `kind` "error" and nothing in it, and was
+  counted as cached goodput. The error travels with the copy now, and it is counted as skipped.
+- **A straggler held back everything behind it.** The threaded path consumed `pool.map` in input
+  order, so one slow request delayed the banking, the progress and the error of every finished
+  request behind it. Measured: the first progress report arrived **0.62s** into a run where fifteen
+  of sixteen requests took 10ms. It is a bounded rolling window now, two requests queued per worker,
+  banking each group the moment it lands.
+- **A fatal error went unnoticed until the iterator reached it.** Behind one slow first group, the
+  pool churned through the rest while nobody was looking: **64 of 64** requests went out on a run
+  doomed by the second. Now the failure is seen at completion, the queue is dropped and nothing
+  unstarted is waited on.
+- **The fast path spent permits it was not about to use, then drained them after giving up.** A
+  permit was taken before the send slot, so with a hundred bodies and two slots every permit was
+  spent by the third send and the limiter's timestamps were not send times. The permit is now taken
+  inside the slot, immediately before the request. Waiting happens in slices and checks whether the
+  run is over, so an abandoned run stops waiting as well as sending: with permits scarce it used to
+  drain all hundred before returning.
+- **Threaded `warm()` opened nothing.** Constructing an `HTTPConnection` connects lazily, so warming
+  four workers made **zero** handshakes. It connects now, under the warm-up deadline rather than the
+  request timeout.
+- **`Retry-After` only understood one of its two forms.** RFC 9110 allows an HTTP date, which was
+  read as no hint at all. Both forms are parsed, and the server's number is a floor with jitter on
+  top rather than an exact wait, because every worker given the same hint came back at the same
+  instant.
+- **`pack` counted items where the API counts tokens.** TypeSafe documents 64k tokens in a request
+  and 32k for the state plus the longest question, so several individually legal items could make one
+  illegal request, and raising `pack` made it likelier. Groups are planned against both limits at a
+  pessimistic 3.5 characters per token, against 3.92 measured live. Short items still pack to `pack`.
+- Idle connections on the fast path expired after httpx's default 5 seconds, so every call in an
+  intermittent job paid a handshake. Now 60.
+
+### Changed
+- **A claim in the last release was wrong and is corrected in place.** v0.5.0's README said 245
+  retries at 9M input tokens a minute proved a token-counted limit was binding. TypeSafe documents
+  250,000 tokens a second, which is 15M a minute, so 9M is *below* the published ceiling on average
+  and bursts, allocation changes or plain overload explain the pushbacks equally well. That run kept
+  no status codes, so it cannot tell them apart.
+- The README now says where the ceiling is. At `pack=32` and 1,000 requests a minute the request-only
+  maximum is **533 items/s**, and the measured 441 is 21% below it, so there is no large win left in
+  the transport. It also says this is not compute-bound: about 600 KB/s of JSON, so `orjson` and
+  `uvloop` have nothing to do here.
+- Recorded a measurement that is not shipped: the question block is repeated per item, 74.5% of a
+  `pack=32` body, and carrying the guidance once in `state` cut a live 32-item request from **4,598
+  to 1,777 billed input tokens** with all 32 labels unchanged. Not the default, because a prompt
+  change needs the paired accuracy run first and one request is not an accuracy result.
+
+72 tests, no key and no network needed.
+
 ## v0.5.0 (2026-09-20)
 
 v0.4.0 made a job durable and gave it no way to get past a row it could not do, and those two

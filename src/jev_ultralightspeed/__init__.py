@@ -31,15 +31,15 @@ import ssl
 import threading
 import time
 import urllib.parse
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict, deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as wait_for
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -57,9 +57,16 @@ TIMEOUT_S = 60.0
 MAX_ITEM_CHARS = 20_000
 WARM_TIMEOUT_S = 5.0                   # warming is an optimisation, never a wait worth minutes
 MAX_LATENCIES = 10_000                 # kept for percentiles, not forever
+# The provider documents 64k tokens in a request and 32k for the state plus the
+# longest question, and says the limits can change. Held well under both, because
+# `pack` counts items and an oversized request is refused whatever the count.
+MAX_REQUEST_TOKENS = 56_000
+MAX_STATE_TOKENS = 28_000
+CHARS_PER_TOKEN = 3.5                  # conservative: 3.92 measured on a live packed request
 SKIP_FRACTION = 0.01                   # of the items in a call, before skipping gives up
 MIN_SKIP_BUDGET = 5                    # requests' worth, so a small call is not held to 1%
 MAX_FAILURES_KEPT = 1_000              # reported in full; the rest are counted only
+WINDOW_PER_WORKER = 2                  # requests queued per worker, so a straggler is not a wall
 
 
 class JevError(RuntimeError):
@@ -145,16 +152,29 @@ class _Limiter:
         self._recent: list[float] = []
         self._lock = threading.Lock()
 
+    def try_take(self) -> float:
+        """
+        0.0 when a permit was taken, otherwise how long until one frees up.
+
+        Asking without blocking is what lets the fast path wait in slices and
+        notice that its run has been abandoned, rather than draining a queue of
+        permits nobody is going to use.
+        """
+        with self._lock:
+            now = time.monotonic()
+            self._recent = [t for t in self._recent if now - t < 60.0]
+            if len(self._recent) < self.per_minute:
+                self._recent.append(now)
+                return 0.0
+            return max(0.01, 60.0 - (now - self._recent[0]))
+
     def take(self) -> None:
+        """The blocking form, for the threaded transport."""
         while True:
-            with self._lock:
-                now = time.monotonic()
-                self._recent = [t for t in self._recent if now - t < 60.0]
-                if len(self._recent) < self.per_minute:
-                    self._recent.append(now)
-                    return
-                wait = 60.0 - (now - self._recent[0])
-            time.sleep(max(0.01, wait))
+            wait = self.try_take()
+            if wait <= 0.0:
+                return
+            time.sleep(wait)
 
 
 class Client:
@@ -306,7 +326,16 @@ class Client:
         gate = threading.Barrier(self.workers, timeout=WARM_TIMEOUT_S)
 
         def open_one(_):
-            self._connection()
+            connection = self._connection()
+            # Constructing an HTTPConnection opens nothing: it connects on the
+            # first request. Warming that skips this measured zero handshakes.
+            connection.timeout = WARM_TIMEOUT_S       # a warm-up is never a wait worth minutes
+            try:
+                connection.connect()
+            except OSError:
+                pass                                  # warming is an optimisation, not a step
+            finally:
+                connection.timeout = TIMEOUT_S
             try:
                 gate.wait()
             except threading.BrokenBarrierError:      # a worker gave up; not fatal
@@ -451,7 +480,7 @@ class Client:
                 first_seen[text] = index
                 unique.append(index)
 
-        groups = [unique[at:at + self.pack] for at in range(0, len(unique), self.pack)]
+        groups = self._plan(unique, texts, instructions, criteria, options)
         done = 0
         started = time.monotonic()
 
@@ -534,27 +563,66 @@ class Client:
                     return [self._gave_up(texts[index], str(error), position, len(group))
                             for position, index in enumerate(group, start=1)]
 
+            # A bounded rolling window, not `pool.map`. Consuming a map in input
+            # order means a slow first request holds back the banking, the
+            # progress and the error of every request behind it that has already
+            # finished: measured locally, a request that came back in 13ms was
+            # not reported for 352ms, and a fatal second request let all 64 start.
+            queued = deque(range(len(groups)))
+            window = max(1, self.workers * WINDOW_PER_WORKER)
+            flying: dict = {}
+            landed: dict[int, list[Answer]] = {}
+
+            def fill() -> None:
+                while queued and len(flying) < window:
+                    which = queued.popleft()
+                    flying[pool.submit(one_group, groups[which])] = which
+
+            fill()
             try:
-                for group, result in zip(groups, pool.map(one_group, groups)):
-                    for index, answer in zip(group, result):
-                        answers[index] = answer
-                        self.last_partial.append(answer)      # kept if a later group fails
-                        self._bank(ledger, [index], texts, [answer],
+                while flying:
+                    ready, _ = wait_for(list(flying), return_when=FIRST_COMPLETED)
+                    for future in ready:
+                        which = flying.pop(future)
+                        result = future.result()          # the group's error surfaces here
+                        group = groups[which]
+                        landed[which] = result
+                        self._bank(ledger, group, texts, result,
                                    instructions, criteria, options)
-                        if answer.ok:
-                            self._remember(texts[index], instructions, criteria, options, answer)
-                    done += len(group)
-                    if on_progress:
-                        on_progress(done, len(unique))
+                        for index, answer in zip(group, result):
+                            if answer.ok:
+                                self._remember(texts[index], instructions, criteria,
+                                               options, answer)
+                        done += len(result)
+                        if on_progress:
+                            on_progress(done, len(unique))
+                    fill()
             except JevError:
+                # Nothing else goes out, and nothing that has not started is
+                # waited on. What landed is kept, in input order.
+                queued.clear()
+                for future in flying:
+                    future.cancel()
+                self.last_partial = [answer for which in sorted(landed)
+                                     for answer in landed[which]]
                 # The fast path flushes before it raises; so must this one, or a
                 # checkpoint means one thing on one transport and another on the
                 # other, which is the whole asymmetry class we keep finding.
                 if ledger is not None:
                     ledger.flush()
                 raise
+            for which in sorted(landed):
+                for index, answer in zip(groups[which], landed[which]):
+                    answers[index] = answer
+            self.last_partial = [answer for which in sorted(landed) for answer in landed[which]]
         for index, source in duplicates.items():
             answers[index] = _copy_answer(answers[source], texts[index])
+            if not answers[index].ok:
+                # Counted as cached when it was set aside, before there was an
+                # answer to look at. A copy of nothing is not goodput.
+                with self._books:
+                    self.usage.cached -= 1
+                    self.usage.skipped += 1
 
         missing = [index for index, answer in enumerate(answers) if answer is None]
         if missing:
@@ -628,6 +696,37 @@ class Client:
             self.latencies.append(milliseconds)
             if len(self.latencies) > MAX_LATENCIES:
                 del self.latencies[:len(self.latencies) - MAX_LATENCIES]
+
+    def _plan(self, indexes, texts, instructions, criteria, options) -> list[list[int]]:
+        """
+        Groups of at most `pack` items that also fit inside one request.
+
+        `pack` counts items, and a request is refused on tokens: several
+        individually legal items make an oversized one, and raising `pack` makes
+        that likelier. The estimate is deliberately pessimistic, at 3.5
+        characters per token against 3.92 measured on a live packed request, and
+        it counts the question block once per item because that is how the API
+        is shaped.
+        """
+        overhead = len(json.dumps(_question(instructions, criteria, options)))
+        groups: list[list[int]] = []
+        current: list[int] = []
+        state_chars = 0
+        request_chars = 0
+        for index in indexes:
+            chars = len(texts[index]) + 12                    # the item_N key rides along
+            fits = (len(current) < self.pack
+                    and (state_chars + chars) < MAX_STATE_TOKENS * CHARS_PER_TOKEN
+                    and (request_chars + chars + overhead) < MAX_REQUEST_TOKENS * CHARS_PER_TOKEN)
+            if current and not fits:
+                groups.append(current)
+                current, state_chars, request_chars = [], 0, 0
+            current.append(index)
+            state_chars += chars
+            request_chars += chars + overhead
+        if current:
+            groups.append(current)
+        return groups
 
     def _bank(self, ledger, group, texts, answers, instructions, criteria, options) -> None:
         """
@@ -715,10 +814,16 @@ def _packed_body(model, texts: Sequence[str], instructions, criteria, options) -
 
 
 def _copy_answer(answer: "Answer", text: str) -> "Answer":
-    """The same answer for another copy of the text, sharing nothing mutable."""
+    """
+    The same answer for another copy of the text, sharing nothing mutable.
+
+    `error` travels with it. Left behind, a second copy of a skipped item came
+    back reporting `ok` True with nothing in it, which is the worst of the three
+    possible answers.
+    """
     return Answer(item=text, p=answer.p, label=answer.label, kind=answer.kind,
                   distribution=dict(answer.distribution), confidence=answer.confidence,
-                  position=answer.position, packed=answer.packed)
+                  position=answer.position, packed=answer.packed, error=answer.error)
 
 
 def _read(entry: dict, text: str, position: int = 1, packed: int = 1) -> Answer:

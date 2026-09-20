@@ -261,34 +261,79 @@ def test_the_threads_transport_keeps_one_pool_so_warming_survives():
     assert client._pool is None
 
 
-def test_backoff_uses_the_server_hint_and_jitters_otherwise():
+def test_the_server_hint_is_a_floor_and_never_the_whole_answer():
+    """
+    Every worker handed the same Retry-After would come back at the same instant,
+    so the jitter goes on top of the server's number rather than underneath it.
+    """
     from jev_ultralightspeed import _http2
 
-    assert _http2._backoff(3, "7") == 7.0                     # the server said seven seconds
+    waits = {_http2._backoff(3, "7") for _ in range(20)}
+    assert all(7.0 <= wait <= 8.0 for wait in waits), sorted(waits)[:3]
+    assert len(waits) > 1, "identical waits mean the workers collide again"
     assert 0.5 <= _http2._backoff(0, "next tuesday") <= 1.5   # unreadable hint, fall through
-    waits = {_http2._backoff(4, None) for _ in range(20)}
-    assert len(waits) > 1, "identical backoff means the workers collide again"
-    assert all(8.0 <= wait <= 24.0 for wait in waits), sorted(waits)[:3]
+    spread = {_http2._backoff(4, None) for _ in range(20)}
+    assert len(spread) > 1
+    assert all(8.0 <= wait <= 24.0 for wait in spread), sorted(spread)[:3]
 
 
-def test_the_fast_path_waits_outside_the_slot_it_holds():
+def test_a_retry_after_date_is_read_as_well_as_a_count():
+    """RFC 9110 allows either form. Only the count used to be understood."""
+    import email.utils
+    import time as clock
+    from jev_ultralightspeed import _http2
+
+    soon = email.utils.formatdate(clock.time() + 30, usegmt=True)
+    assert 25.0 <= _http2._retry_after_seconds(soon) <= 31.0
+    past = email.utils.formatdate(clock.time() - 500, usegmt=True)
+    assert _http2._retry_after_seconds(past) == 0.0            # already allowed, do not wait
+    assert _http2._retry_after_seconds("12") == 12.0
+    assert _http2._retry_after_seconds("later") is None
+    assert _http2._retry_after_seconds(None) is None
+
+
+def test_the_permit_is_taken_where_the_request_is_sent():
     from jev_ultralightspeed import _http2
     import inspect
 
     source = inspect.getsource(_http2.Pipe._one)
-    assert "_wait_for_the_ceiling" in source, "the http2 path must hold the same ceiling"
-    # Both kinds of waiting happen outside the semaphore: the rate limit before
-    # the slot is taken, the backoff after it is given back.
-    assert source.index("_wait_for_the_ceiling") < source.index("async with self._gate")
+    # The permit goes inside the slot, immediately before the send, so what the
+    # limiter records is when the request went out. Taken before the slot, a
+    # hundred bodies against two slots spent every permit by the third send.
+    assert source.index("async with self._gate") < source.index("await self._admit(run)")
+    assert source.index("await self._admit(run)") < source.index("await self._client.post")
+    # The backoff still waits outside the slot, because that slot is scarce.
     assert source.index("async with self._gate") < source.index("await asyncio.sleep(wait)")
-    # And the abandon check is inside the slot, because gather starts every
-    # coroutine at once and they would all pass a check made before that.
     inside = source.index("async with self._gate")
     assert source.index("if run.broken", inside) > inside
     everything = inspect.getsource(_http2.Pipe._all)
     assert "return_exceptions=True" in everything, "a sibling must not cancel the rest"
-    # That a doomed run is abandoned rather than sent in full is measured against
-    # a counting server below, not asserted against the source.
+
+
+def test_an_abandoned_run_stops_waiting_as_well_as_stops_sending():
+    """
+    A doomed run used to stop sending and carry on waiting: one refusal, and then
+    every queued coroutine still took its turn at the rate limiter before the
+    call came back. With permits scarce, that is most of a minute of nothing.
+    """
+    from jev_ultralightspeed import _http2
+
+    if not _http2.available():
+        pytest.skip("httpx not installed")
+    server = Counting()
+    client = Client(key="wrong", url=server.url, pack=1, workers=2,
+                    requests_per_minute=20, transport="http2")
+    started = time.monotonic()
+    try:
+        with pytest.raises(JevError):
+            client.classify([f"item {n}" for n in range(100)], QUESTION)
+    finally:
+        took = time.monotonic() - started
+        client.close()
+        server.close()
+    permits = len(client._limiter._recent)
+    assert permits <= 25, f"{permits} of 100 permits spent on a run that was already over"
+    assert took < 10.0, f"the call took {took:.1f}s to stop waiting"
 
 
 def test_one_limiter_serves_both_transports():
@@ -431,7 +476,8 @@ class Answering:
     way to test it the way a caller sees it.
     """
 
-    def __init__(self, delay=0.0, fail_after=None, drop_last=False, poison=None):
+    def __init__(self, delay=0.0, fail_after=None, drop_last=False, poison=None,
+                 slow_for=None, slow_by=0.0, fail_unless=None):
         # Threading, and it has to be: keep-alive on a single-threaded server
         # serializes the workers, so the concurrency under test disappears and
         # the run deadlocks instead of failing.
@@ -454,6 +500,11 @@ class Answering:
                     number = server.seen
                 if delay:
                     time.sleep(delay)
+                carries = str(asked.get("state"))
+                if slow_for is not None and slow_for in carries:
+                    time.sleep(slow_by)                # the straggler, chosen by content
+                if fail_unless is not None and fail_unless not in carries:
+                    return self.answer(401, {"detail": "no"})
                 if fail_after is not None and number > fail_after:
                     return self.answer(401, {"detail": "no"})
                 names = [name for name in asked["state"] if name.startswith("item_")]
@@ -883,3 +934,121 @@ def test_usage_does_not_call_resumed_items_speed(tmp_path):
     assert client.usage.items_per_second == 0.0
     assert client.usage.tokens_per_item == 0.0
     assert "20 resumed" in str(client.usage)
+
+
+# -- the rolling window -----------------------------------------------------
+
+@both_transports
+def test_a_straggler_does_not_hold_back_what_is_already_done(transport):
+    """
+    Consuming results in input order means one slow request holds back the
+    banking, the progress and the error of everything behind it that has already
+    finished. Measured locally before this: a request back in 13ms, reported at
+    352ms.
+    """
+    server = Answering(delay=0.01, slow_for="item 0", slow_by=0.6)
+    client = a_real_client(server.url, transport, pack=1, workers=4)
+    seen = []
+    started = time.monotonic()
+    try:
+        answers = client.classify([f"item {n}" for n in range(16)], QUESTION,
+                                  on_progress=lambda done, total: seen.append(
+                                      (done, time.monotonic() - started)))
+    finally:
+        client.close()
+        server.close()
+
+    assert len(answers) == 16
+    assert [a.item for a in answers] == [f"item {n}" for n in range(16)]
+    first = seen[0][1]
+    assert first < 0.4, f"the first report waited {first:.2f}s behind the straggler"
+    assert seen[-1][0] == 16
+
+
+def test_a_fatal_error_stops_the_queue_rather_than_draining_it():
+    """
+    A failure in a later group used to go unnoticed until the iterator reached
+    it. Behind one slow first group, the pool churned through the rest while
+    nobody was looking: 64 of 64 started, in the probe.
+    """
+    server = Answering(slow_for="item 0", slow_by=0.5, fail_unless="item 0")
+    client = a_real_client(server.url, "threads", pack=1, workers=8)
+    try:
+        with pytest.raises(JevError):
+            client.classify([f"item {n}" for n in range(64)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert server.seen < 20, f"{server.seen} of 64 requests went out after the run was doomed"
+
+
+# -- a copy of a failure is still a failure ---------------------------------
+
+def test_a_duplicate_of_a_skipped_item_is_also_skipped():
+    """
+    The copy came back saying `ok` True with no answer in it and no error, which
+    is worse than either a failure or an exception.
+    """
+    server = Answering(poison="same")
+    client = a_real_client(server.url, "threads", pack=4, workers=1)
+    try:
+        answers = client.classify(["same", "same"], QUESTION, on_error="skip")
+    finally:
+        client.close()
+        server.close()
+
+    assert [a.ok for a in answers] == [False, False]
+    assert all(a.error and "unreadable" in a.error for a in answers)
+    assert client.usage.skipped == 2, "a copy of nothing was counted as work done"
+    assert client.usage.cached == 0
+
+
+# -- warming that opens something -------------------------------------------
+
+def test_threaded_warming_actually_opens_the_connections():
+    """Constructing an HTTPConnection opens nothing. This measured zero before."""
+    import http.client
+
+    opened = []
+    real = http.client.HTTPConnection.connect
+
+    def counted(self):
+        opened.append(1)
+        return real(self)
+
+    http.client.HTTPConnection.connect = counted
+    server = Answering()
+    client = a_real_client(server.url, "threads", pack=1, workers=3)
+    try:
+        client.warm()
+    finally:
+        http.client.HTTPConnection.connect = real
+        client.close()
+        server.close()
+    assert len(opened) == 3, f"{len(opened)} of 3 connections were actually opened"
+
+
+# -- packs that fit the request as well as the count ------------------------
+
+def test_a_pack_is_split_when_the_items_will_not_fit_one_request():
+    """
+    `pack` counts items and the API refuses on tokens, so several individually
+    legal items can make one illegal request.
+    """
+    from jev_ultralightspeed import CHARS_PER_TOKEN, MAX_STATE_TOKENS
+
+    client = Fake(pack=64)
+    big = "x" * 19_000                                  # legal on its own, 19k characters
+    room = int(MAX_STATE_TOKENS * CHARS_PER_TOKEN)
+    answers = client.classify([f"{big}{n}" for n in range(64)], QUESTION)
+    assert len(answers) == 64
+    packs = [len(body["state"]) for body in client.sent]
+    assert len(packs) > 1, "64 items of 19,000 characters went out as one request"
+    assert all(count * 19_000 < room for count in packs), packs
+    assert max(packs) < 64
+
+
+def test_small_items_still_pack_to_the_limit():
+    client = Fake(pack=16)
+    client.classify([f"item {n}" for n in range(32)], QUESTION)
+    assert [len(body["state"]) for body in client.sent] == [16, 16]

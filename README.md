@@ -113,18 +113,46 @@ to 99.6% of the time. Treating them as 30,000 independent draws would report an 
 times narrower than the evidence supports. `bench_eval.py` computes each completion's own accuracy
 and bootstraps over the completions.
 
-**245 retries against the baseline's 1, and what that says about the 26.5x.** The packed arm made
-942 requests in 68 seconds, which is 831 a minute, well under the published 1,200, and still got
-pushed back 245 times. That points at a second limit counted in tokens: at $0.430 of input in 68
-seconds it was pushing about **9M input tokens a minute** against the baseline's 578K.
+**245 retries against the baseline's 1.** The packed arm made 942 requests in 68 seconds, which is
+831 a minute, well under the published 1,200, and still got pushed back 245 times. At $0.430 of
+input in 68 seconds it was moving about **9M input tokens a minute** against the baseline's 578K.
 
-Which means 26.5x is the gap between *which* ceiling each arm happens to hit, and it is a ceiling
-rather than a floor. Under TypeSafe's published limits it is what you get, and it is measured. On a
-tier with a tighter token budget the arm that is already being throttled is the one that loses, and
-what survives is the part that does not depend on anyone's rate tier: **41% fewer tokens, so about
-1.7x**. Treat 26.5x as the number most likely to move on someone else's account, and 1.7x as the
-one that will not. Nothing failed either way: the client backs off with jitter, honours
-`Retry-After`, and frees its slot while it waits, and `usage.retries` counts it.
+An earlier version of this README said that proved a token-counted limit was binding. It does not.
+TypeSafe documents 250,000 tokens a second, which is 15M a minute, so 9M is *below* the published
+token ceiling on average, and bursts inside a second, a changing allocation, or plain service
+overload all explain 245 pushbacks equally well. That run did not keep the status codes or a
+short-window send trace, so it cannot tell them apart. Corrected rather than deleted, because the
+wrong version was published.
+
+What does survive: 26.5x is the gap between *which* ceiling each arm happens to hit, so it is a
+ceiling and not a floor. Under TypeSafe's published limits it is what you get, and it is measured.
+The part that does not depend on anyone's rate tier is the token saving: **41% fewer tokens, so
+about 1.7x**. Treat 26.5x as the number most likely to move on someone else's account and 1.7x as
+the one that will not. Nothing failed either way: the client backs off with jitter, honours
+`Retry-After` as a floor with jitter on top, and frees its slot while it waits.
+
+**How much room is left, arithmetically.** At `pack=32` and the default 1,000 requests a minute, the
+request-only ceiling is **533 items/s** before retries, token limits or latency. The measured 441 is
+21% below that, so there is no 10x hiding in the transport: one connection, one loop and better
+scheduling are within a fifth of the arithmetic. Another large jump has to come from fewer tokens
+per judgement, more items per request, or a higher allocation, not from polishing the client.
+
+| pack | items/s ceiling at 1,000 requests a minute |
+| ---: | ---: |
+| 8 | 133 |
+| 32 | 533 |
+| 64 | 1,067 |
+
+It is also not compute-bound. At 441 items/s and 341 tokens an item it is moving roughly 600 KB/s of
+JSON, so `orjson`, `uvloop` and more cores have nothing to do here. Every remaining lever is about
+permission: fewer tokens, fewer requests, more ceiling, or not asking at all.
+
+**Measured but not shipped.** The question block is repeated once per item inside a packed request,
+which is 74.5% of the body at `pack=32`, and bytes per item are flat across pack depth. Carrying the
+guidance once in `state` instead cut a live 32-item request from **4,598 to 1,777 billed input
+tokens**, a 61% saving, with all 32 answers readable and all 32 labels unchanged. It is not the
+default because it changes the prompt, and a prompt change needs the paired accuracy run before it
+earns that. One request is not an accuracy result.
 
 **The two arms differ by one sentence as well as by shape.** A packed request ends with "Judge
 item_N only, ignoring every other item"; an unpacked one has nothing to disambiguate and so does
@@ -223,6 +251,12 @@ the order you passed the items in, however the requests were shuffled to get the
 | `model` | `jev-latest` | passed straight through. |
 | `url` | the Jev endpoint | point it at a gateway or a mock. |
 
+`pack` is a maximum, not a promise. TypeSafe documents 64k tokens in a request and 32k for the state
+plus the longest question, and `pack` counts items, so several individually legal items can make one
+illegal request. Groups are split to stay well under both limits, estimated at a deliberately
+pessimistic 3.5 characters per token against 3.92 measured on a live packed request. Short items are
+unaffected and still pack to `pack`.
+
 ### Resuming a job that dies
 
 A million rows take a quarter of an hour and thirty thousand requests. Something will eventually
@@ -301,12 +335,15 @@ must not be quietly skipped a million times. A test holds that line.
   yields each chunk as it completes, after a failed call `client.last_partial` holds the answers
   that did arrive on either transport, and with a `checkpoint` they are already on disk.
 - **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
+- **It is not the cheapest way to do a backfill nobody is waiting for.** If TypeSafe offers an
+  offline batch endpoint, it will beat everything here on both price and ceiling, because none of
+  this can buy a rate limit. This is for work that has to happen now.
 
 ## Development
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 63 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 72 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
