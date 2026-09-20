@@ -157,11 +157,16 @@ class Client:
         if transport == "http2" and not _http2.available():
             raise JevError('transport="http2" needs httpx and h2: '
                            'pip install "jev-ultralightspeed[fast]"')
+        if transport == "http2" and _http2.in_a_loop():
+            raise JevError('transport="http2" cannot run inside an event loop: call this from a '
+                           'thread (asyncio.to_thread), or pass transport="threads"')
         self.transport = ("http2" if transport == "auto" and _http2.available()
                           else "threads" if transport == "auto" else transport)
         self._cache: OrderedDict[tuple, Answer] = OrderedDict()
         self._local = threading.local()
         self._pipe = None
+        self._pool: ThreadPoolExecutor | None = None
+        self._books = threading.Lock()
         self.latencies: list[float] = []
         self._limiter = _Limiter(requests_per_minute)
         self.usage = Usage()
@@ -228,27 +233,52 @@ class Client:
         if self._pipe is None:
             self._pipe = _http2.Pipe(self.url, self.key, inflight=self.workers,
                                      timeout=TIMEOUT_S, retry_statuses=RETRY_STATUSES,
-                                     max_retries=MAX_RETRIES)
+                                     max_retries=MAX_RETRIES,
+                                     requests_per_minute=self._limiter.per_minute)
         return self._pipe
+
+    def _pool_for(self) -> ThreadPoolExecutor:
+        """
+        One pool for the life of the client. The connections live in thread
+        local storage, so a pool per call would throw away every connection it
+        had just opened, warming included.
+        """
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=self.workers,
+                                            thread_name_prefix="jev")
+        return self._pool
 
     def warm(self, workers: int | None = None) -> None:
         """
         Open the connections before the work arrives, so the first items do
         not pay for a TLS handshake. Harmless to call twice.
         """
-        if self.transport == "http2":
+        if self.transport == "http2" and not _http2.in_a_loop():
             self._pipe_for().warm()
             return
-        count = workers or self.workers
+        if self.transport == "http2":
+            return              # inside a loop the threaded path runs; nothing to warm
+        pool = self._pool_for()
+        # One task per worker, held until all of them have a connection, so
+        # the work is not all done by the first thread to wake up.
+        gate = threading.Barrier(self.workers, timeout=TIMEOUT_S)
+
         def open_one(_):
             self._connection()
-        with ThreadPoolExecutor(max_workers=count) as pool:
-            list(pool.map(open_one, range(count)))
+            try:
+                gate.wait()
+            except threading.BrokenBarrierError:      # a worker gave up; not fatal
+                pass
+
+        list(pool.map(open_one, range(self.workers)))
 
     # -- the useful call ---------------------------------------------------
     def close(self) -> None:
-        """Let go of the connections. Workers drop theirs with the pool."""
+        """Let go of every connection this client opened."""
         self._drop_connection()
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+            self._pool = None
         if self._pipe is not None:
             self._pipe.close()
             self._pipe = None
@@ -263,9 +293,11 @@ class Client:
         chunk: int = 5_000,
     ):
         """
-        The same work, yielding answers as they arrive instead of returning
-        them all at once. Nothing bigger than `chunk` items is ever held, so a
-        million rows costs the same memory as five thousand.
+        The same work, a chunk at a time, so a million rows cost the memory
+        of one chunk rather than of the job. Each chunk is classified in full
+        and then yielded in order: answers do not arrive one by one the moment
+        each request lands, and the last item of a chunk waits for the rest of
+        that chunk.
 
             for answer in client.stream(rows, question):
                 writer.writerow([answer.item, answer.label, answer.p])
@@ -306,7 +338,7 @@ class Client:
         for index, text in enumerate(texts):
             hit = self._cached(text, instructions, criteria, options)
             if hit is not None:
-                answers[index] = Answer(**{**hit.__dict__, "item": text})
+                answers[index] = _copy_answer(hit, text)
                 self.usage.cached += 1
             else:
                 todo.append(index)
@@ -327,13 +359,14 @@ class Client:
         groups = [unique[at:at + self.pack] for at in range(0, len(unique), self.pack)]
         done = 0
         started = time.monotonic()
+        # Inside somebody else's event loop the threaded path is used instead.
         if groups and self.transport == "http2" and not _http2.in_a_loop():
             # One connection, every request in flight on it.
             bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
                       for g in groups]
             payloads = self._pipe_for().ask_all(
                 bodies, on_request=self._count, on_timing=self.latencies.append,
-                on_retry=lambda: setattr(self.usage, 'retries', self.usage.retries + 1))
+                on_retry=self._count_retry)
             for group, data in zip(groups, payloads):
                 for position, index in enumerate(group, start=1):
                     answer = _read(self._entry(data, position), texts[index])
@@ -343,23 +376,27 @@ class Client:
                 if on_progress:
                     on_progress(done, len(unique))
         elif groups:
-            with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                for group, result in zip(groups, pool.map(
-                    lambda g: self._ask_group([texts[i] for i in g], instructions, criteria, options),
-                    groups,
-                )):
-                    for index, answer in zip(group, result):
-                        answers[index] = answer
-                        self._remember(texts[index], instructions, criteria, options, answer)
-                    done += len(group)
-                    if on_progress:
-                        on_progress(done, len(unique))
+            pool = self._pool_for()
+            for group, result in zip(groups, pool.map(
+                lambda g: self._ask_group([texts[i] for i in g], instructions, criteria, options),
+                groups,
+            )):
+                for index, answer in zip(group, result):
+                    answers[index] = answer
+                    self._remember(texts[index], instructions, criteria, options, answer)
+                done += len(group)
+                if on_progress:
+                    on_progress(done, len(unique))
         for index, source in duplicates.items():
-            answers[index] = Answer(**{**answers[source].__dict__, "item": texts[index]})
+            answers[index] = _copy_answer(answers[source], texts[index])
 
+        missing = [index for index, answer in enumerate(answers) if answer is None]
+        if missing:
+            raise JevError(f"{len(missing)} of {len(texts)} items came back without an answer; "
+                           f"the first is item {missing[0] + 1}")
         self.usage.items += len(texts)
         self.usage.seconds += time.monotonic() - started
-        return [answer for answer in answers if answer is not None]
+        return answers
 
     # -- the parts ---------------------------------------------------------
     def _body(self, texts: Sequence[str], instructions: str,
@@ -383,9 +420,14 @@ class Client:
 
     def _count(self, data: dict) -> None:
         usage = data.get("usage") or {}
-        self.usage.requests += 1
-        self.usage.input_tokens += int(usage.get("input_tokens") or 0)
-        self.usage.output_tokens += int(usage.get("output_tokens") or 0)
+        with self._books:                       # several threads add to these
+            self.usage.requests += 1
+            self.usage.input_tokens += int(usage.get("input_tokens") or 0)
+            self.usage.output_tokens += int(usage.get("output_tokens") or 0)
+
+    def _count_retry(self) -> None:
+        with self._books:
+            self.usage.retries += 1
 
     def _key(self, text: str, instructions: str, criteria, options) -> tuple:
         return (self.model, text, instructions, json.dumps(criteria, sort_keys=True),
@@ -399,7 +441,8 @@ class Client:
     def _remember(self, text, instructions, criteria, options, answer: Answer) -> None:
         if not self.cache_on:
             return
-        self._cache[self._key(text, instructions, criteria, options)] = answer
+        # A copy: what the caller was handed is theirs to mutate.
+        self._cache[self._key(text, instructions, criteria, options)] = _copy_answer(answer, text)
         while len(self._cache) > 10_000:                 # bounded, oldest first
             self._cache.popitem(last=False)
 
@@ -435,6 +478,12 @@ def _packed_body(model, texts: Sequence[str], instructions, criteria, options) -
             criteria, options)
         questions[name] = question
     return {"model": model, "state": state, "questions": questions}
+
+
+def _copy_answer(answer: "Answer", text: str) -> "Answer":
+    """The same answer for another copy of the text, sharing nothing mutable."""
+    return Answer(item=text, p=answer.p, label=answer.label, kind=answer.kind,
+                  distribution=dict(answer.distribution), confidence=answer.confidence)
 
 
 def _read(entry: dict, text: str) -> Answer:
@@ -475,4 +524,7 @@ def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
                          "cache", "transport")
                         if name in kwargs}
     client = Client(**client_arguments)
-    return client.classify(list(items), instructions, **kwargs)
+    try:
+        return client.classify(list(items), instructions, **kwargs)
+    finally:
+        client.close()

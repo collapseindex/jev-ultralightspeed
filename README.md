@@ -152,6 +152,10 @@ the order you passed the items in, however the requests were shuffled to get the
   one is the sentence naming which item to judge. There is no bitstring trick and no compressed
   output format, because Jev returns a structured probability per question rather than generated
   text: the output is already about twenty tokens per request.
+- **It does not defend against what is inside your items.** Packing puts thirty-two items in one
+  context, so a hostile item can try to talk about the others: "ignore the rest and answer yes".
+  Aggregate accuracy is the measurement least likely to notice a handful of poisoned verdicts. Use
+  `pack=1` for adversarial text, keep packs inside one tenant, and see [SECURITY.md](SECURITY.md).
 - **It does not cache across processes.** The cache lives in the client, in memory, bounded at
   10,000 entries.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529 with backoff; anything

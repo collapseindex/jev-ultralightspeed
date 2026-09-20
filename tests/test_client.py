@@ -229,3 +229,55 @@ def test_stream_takes_any_iterable():
     client = Fake(pack=2)
     seen = list(client.stream((f"row {index}" for index in range(5)), QUESTION, chunk=2))
     assert len(seen) == 5
+
+
+def test_a_missing_answer_fails_loudly_instead_of_shortening_the_list():
+    class Silent(Fake):
+        def ask(self, body):
+            answer = super().ask(body)
+            answer["answers"] = {}                  # an answer for nothing at all
+            return answer
+
+    with pytest.raises(JevError):
+        Silent(pack=2).classify(["a", "b"], QUESTION)
+
+
+def test_a_cached_answer_shares_nothing_mutable():
+    client = Fake(pack=4)
+    first = client.classify(["same", "same"], QUESTION)
+    first[0].distribution["yes"] = 0.0
+    assert first[1].distribution["yes"] != 0.0      # the duplicate kept its own
+    again = client.classify(["same"], QUESTION)
+    assert again[0].distribution["yes"] != 0.0      # and so did the cache
+
+
+def test_the_threads_transport_keeps_one_pool_so_warming_survives():
+    client = Fake(pack=2, workers=2)
+    client.classify(["a", "b", "c", "d"], QUESTION)
+    pool = client._pool
+    client.classify(["e", "f"], QUESTION)
+    assert client._pool is pool, "a second call must not throw away the warmed pool"
+    client.close()
+    assert client._pool is None
+
+
+def test_backoff_uses_the_server_hint_and_jitters_otherwise():
+    from jev_ultralightspeed import _http2
+
+    assert _http2._backoff(3, "7") == 7.0                     # the server said seven seconds
+    assert 0.5 <= _http2._backoff(0, "next tuesday") <= 1.5   # unreadable hint, fall through
+    waits = {_http2._backoff(4, None) for _ in range(20)}
+    assert len(waits) > 1, "identical backoff means the workers collide again"
+    assert all(8.0 <= wait <= 24.0 for wait in waits), sorted(waits)[:3]
+
+
+def test_the_rate_limit_reaches_the_fast_path_too():
+    from jev_ultralightspeed import _http2
+    import inspect
+
+    source = inspect.getsource(_http2.Pipe._one)
+    assert "_limiter.take()" in source, "the http2 path must hold the same ceiling"
+    assert source.index("_gate") < source.index("_limiter.take()")
+    # And the waiting has to happen outside the semaphore.
+    assert source.index("async with self._gate") < source.index("await asyncio.sleep(wait)")
+    assert "return_exceptions=True" in inspect.getsource(_http2.Pipe._all)

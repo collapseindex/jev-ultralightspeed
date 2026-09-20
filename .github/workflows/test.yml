@@ -18,3 +18,23 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install pytest
       - run: python -m pytest tests -q
+
+  fast:
+    # The HTTP/2 path is the one the numbers were measured on, so it gets its
+    # own job with the extra actually installed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest ".[fast]"
+      - run: python -m pytest tests -q
+      - name: the fast transport is the one chosen
+        run: |
+          python - <<'PY'
+          from jev_ultralightspeed import Client, _http2
+          assert _http2.available(), "the [fast] extra did not install httpx and h2"
+          assert Client(key="ci").transport == "http2", "auto did not pick http2"
+          print("http2 transport available and selected")
+          PY

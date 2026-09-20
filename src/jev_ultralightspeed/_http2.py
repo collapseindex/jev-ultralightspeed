@@ -17,6 +17,7 @@ them per call costs more than the multiplexing saves.
 from __future__ import annotations
 
 import asyncio
+import random
 import ssl
 import threading
 import time
@@ -39,6 +40,20 @@ def available() -> bool:
     return True
 
 
+def _backoff(attempt: int, retry_after: str | None) -> float:
+    """
+    How long to wait. The server's own Retry-After wins; otherwise doubling
+    with jitter, because eight workers backing off on the same schedule
+    collide again by construction.
+    """
+    if retry_after:
+        try:
+            return max(0.0, min(60.0, float(retry_after)))
+        except ValueError:
+            pass                                    # a date, not seconds: fall through
+    return min(30.0, 2 ** attempt) * (0.5 + random.random())
+
+
 def in_a_loop() -> bool:
     """True when the caller is already inside an event loop."""
     try:
@@ -48,21 +63,49 @@ def in_a_loop() -> bool:
     return True
 
 
+class _AsyncLimiter:
+    """
+    The sliding window again, for the event loop.
+
+    The threaded client's limiter blocks a thread, which would stall every
+    request sharing this loop, so the same rule is enforced with an awaitable
+    sleep instead.
+    """
+
+    def __init__(self, per_minute: int) -> None:
+        self.per_minute = max(1, per_minute)
+        self._recent: list[float] = []
+        self._lock = asyncio.Lock()
+
+    async def take(self) -> None:
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                self._recent = [t for t in self._recent if now - t < 60.0]
+                if len(self._recent) < self.per_minute:
+                    self._recent.append(now)
+                    return
+                wait = 60.0 - (now - self._recent[0])
+            await asyncio.sleep(max(0.01, wait))
+
+
 class Pipe:
     """A background event loop holding one HTTP/2 client open."""
 
     def __init__(self, url: str, key: str, *, inflight: int, timeout: float,
-                 retry_statuses, max_retries: int) -> None:
+                 retry_statuses, max_retries: int, requests_per_minute: int) -> None:
         self.url = url
         self.inflight = max(1, inflight)
         self.timeout = timeout
         self.retry_statuses = retry_statuses
         self.max_retries = max_retries
+        self.requests_per_minute = requests_per_minute
         self._headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
         self._ready = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
         self._gate: asyncio.Semaphore | None = None
+        self._limiter: _AsyncLimiter | None = None
         self._thread = threading.Thread(target=self._run, name="jev-http2", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=10)
@@ -81,14 +124,24 @@ class Pipe:
                                          headers=self._headers,
                                          verify=ssl.create_default_context())
         self._gate = asyncio.Semaphore(self.inflight)
+        self._limiter = _AsyncLimiter(self.requests_per_minute)
         self._ready.set()
         self._loop.run_forever()
 
     async def _one(self, body: dict, on_request, on_timing, on_retry) -> dict:
+        """
+        One request, with its waiting done outside the semaphore.
+
+        A request sleeping off a 429 used to hold one of the few in-flight
+        slots while doing nothing, which is throughput thrown away exactly
+        when there is least of it to spare.
+        """
         from . import JevError
 
-        async with self._gate:
-            for attempt in range(self.max_retries):
+        for attempt in range(self.max_retries):
+            wait = None
+            async with self._gate:
+                await self._limiter.take()          # the same ceiling the threads keep
                 started = time.monotonic()
                 try:
                     answer = await self._client.post(self.url, json=body)
@@ -101,21 +154,31 @@ class Pipe:
                         return data
                     if answer.status_code not in self.retry_statuses or attempt == self.max_retries - 1:
                         raise JevError(f"Jev answered {answer.status_code}: {answer.text[:300]}")
-                    if on_retry:
-                        on_retry()
+                    wait = _backoff(attempt, answer.headers.get("retry-after"))
                 except httpx.HTTPError as error:
                     if on_timing:
                         on_timing((time.monotonic() - started) * 1000)
                     if attempt == self.max_retries - 1:
                         raise JevError(f"could not reach Jev: {error}") from error
-                    if on_retry:
-                        on_retry()
-                await asyncio.sleep(min(30.0, 2 ** attempt))
-            raise JevError("out of retries")
+                    wait = _backoff(attempt, None)
+            if on_retry:
+                on_retry()
+            await asyncio.sleep(wait)               # the slot is free while this waits
+        raise JevError("out of retries")
 
     async def _all(self, bodies, on_request, on_timing, on_retry) -> list[dict]:
-        return list(await asyncio.gather(*(self._one(body, on_request, on_timing, on_retry)
-                                           for body in bodies)))
+        """
+        Every request runs to its own end. Without this, one bad answer
+        cancels the siblings mid-flight and a long run returns nothing, having
+        spent the money anyway.
+        """
+        answers = await asyncio.gather(
+            *(self._one(body, on_request, on_timing, on_retry) for body in bodies),
+            return_exceptions=True)
+        for answer in answers:
+            if isinstance(answer, BaseException):
+                raise answer
+        return list(answers)
 
     # -- from ordinary code ------------------------------------------------
     def ask_all(self, bodies: Sequence[dict], *, on_request: Callable | None = None,
