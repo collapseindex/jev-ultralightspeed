@@ -67,11 +67,15 @@ The baseline here is not a slow loop: it is one item per request with the same e
 flight, so the 18x is against a client that is already parallel. Against an actual sequential loop
 it is far larger, and far less interesting.
 
-| shape | items/s | requests | tokens/item | cost | agreement with the humans | 95% interval |
+| | items/s | requests | tokens/item | cost | agreement with the humans | 95% interval |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| one request per item | 41.1 | 1,347 | 613 | $0.0322 | 89.2% | 87.5 to 90.8 |
-| **packed 8** | **270.9** | 169 | 396 | $0.0200 | 90.0% | 88.3 to 91.5 |
-| **packed 32** | **739.2** | 43 | 374 | $0.0188 | 90.6% | 89.0 to 92.1 |
+| jev, one request per item | 41.1 | 1,347 | 613 | $0.0322 | 89.2% | 87.5 to 90.8 |
+| **jev + ultralightspeed, pack 8** | **270.9** | 169 | 396 | $0.0200 | 90.0% | 88.3 to 91.5 |
+| **jev + ultralightspeed, pack 32** | **739.2** | 43 | 374 | $0.0188 | 90.6% | 89.0 to 92.1 |
+
+This is not Jev against some other model. It is **jev-1.13.0 against itself**: same model, same
+question, same items, same criteria. The only thing that changes is how this client shapes the
+requests.
 
 The three intervals overlap, so the judge is as good packed as it is one item at a time.
 
