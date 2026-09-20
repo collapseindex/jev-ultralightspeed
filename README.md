@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.10.5** · Apache-2.0 · no required dependencies
+**v0.11.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -131,6 +131,13 @@ about 1.7x**. Treat 26.5x as the number most likely to move on someone else's ac
 the one that will not. Nothing failed either way: the client backs off with jitter, honours
 `Retry-After` as a floor with jitter on top, and frees its slot while it waits.
 
+**26.5x is the conservative end of this benchmark, and it moves with luck.** The baseline arm cannot
+vary: one item a request at 1,000 requests a minute is **16.7 items/s** by arithmetic, so the whole
+ratio is the packed arm divided by 16.7. The packed arm measured 441 against a 533 ceiling because of
+its 245 retries, and later runs on the same endpoint have seen none at all. A rerun on a quiet day
+would land near **32x** without a line of code changing, which is the honest reason this figure has
+not been refreshed: raising it would be reporting a better afternoon, not a better client.
+
 **How much room is left, and where it probably went.** At `pack=32` and the default 1,000 requests a
 minute the ceiling is **533 items/s**. The measured 441 is 17.3% below it, and reaching it would be a
 20.9% improvement.
@@ -141,7 +148,11 @@ items. Where the time went can be estimated but not proved from that run: eight 
 seconds is 544 worker-seconds, 942 requests at the 318ms mean latency measured today would be about
 300 of them, and the 244 left over against 245 retries is close to a second each, which is what the
 backoff asks for on an early attempt. Consistent, not established: the run recorded neither the status
-codes nor the time spent waiting, so retries cannot be separated from a slower service that day.
+codes nor the time spent waiting, so retries cannot be separated from a slower service that day. That
+gap is closed for next time. `usage.pushback` now counts retries by status code and `usage.waited` adds
+up the time spent sitting them out, so a slow run says why it was slow:
+
+    8 items in 1.00s (8.0/s, 8 requests, 3 retried (2x429, 1x503, 0.6s waiting), ...)
 
 | pack | items/s ceiling at 1,000 requests a minute |
 | ---: | ---: |
@@ -662,7 +673,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 111 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 115 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls

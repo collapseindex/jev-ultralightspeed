@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.11.0 (2026-09-20)
+
+### Added
+- **`usage.pushback` and `usage.waited`.** Retries are counted by status code now, and the time spent
+  sitting them out is added up, so a slow run can say why it was slow:
+
+      8 items in 1.00s (8.0/s, 8 requests, 3 retried (2x429, 1x503, 0.6s waiting), ...)
+
+  A count on its own generates mysteries. The headline benchmark took 245 retries and recorded nothing
+  about them, so whether they were 429s, 529s or dropped connections can never be settled. Status 0 is
+  anything that never answered at all.
+
+### Decided
+- **The 30,000 judgement headline is not being rerun, and the README now says why.** The baseline arm
+  cannot vary: one item a request at 1,000 requests a minute is 16.7 items/s by arithmetic, so the
+  whole ratio is the packed arm over 16.7. The packed arm measured 441 against a 533 ceiling because of
+  its 245 retries, and no run since has seen a single one. A rerun on a quiet day would land near
+  **32x** without a line of code changing, so refreshing it would report a better afternoon rather than
+  a better client. 26.5x is the conservative end and stays.
+
+  The accuracy half needed no rerun either: `pack=32` has been measured four more times today across
+  the tuning, confidence and trimming benchmarks, at 88.9%, 89.3%, 89.4% and 89.7%, all sitting on the
+  published 89.2%.
+
+### Changed
+- A test that asserted the shape of `Client.ask`'s source now drives a local server that pushes back
+  three times and checks what was recorded. Behaviour rather than text, which is what broke it.
+
+115 tests, no key and no network needed.
+
 ## v0.10.5 (2026-09-20)
 
 No library change. Once the question stopped being repeated per item, nearly everything left in the

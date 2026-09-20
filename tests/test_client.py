@@ -352,7 +352,7 @@ def test_the_threaded_path_retries_like_the_fast_one():
     source = inspect.getsource(Client.ask)
     assert "_backoff" in source, "the threaded path needs jitter and Retry-After too"
     assert 'getheader("retry-after")' in source
-    assert "self._count_retry()" in source, "counting retries needs the lock"
+    assert "self._count_retry(" in source, "counting retries needs the lock"
     assert "2 ** attempt" not in source, "the bare doubling should be gone"
 
 
@@ -477,7 +477,7 @@ class Answering:
     """
 
     def __init__(self, delay=0.0, fail_after=None, drop_last=False, poison=None,
-                 slow_for=None, slow_by=0.0, fail_unless=None):
+                 slow_for=None, slow_by=0.0, fail_unless=None, push_back=0, status=429):
         # Threading, and it has to be: keep-alive on a single-threaded server
         # serializes the workers, so the concurrency under test disappears and
         # the run deadlocks instead of failing.
@@ -505,6 +505,15 @@ class Answering:
                     time.sleep(slow_by)                # the straggler, chosen by content
                 if fail_unless is not None and fail_unless not in carries:
                     return self.answer(401, {"detail": "no"})
+                if number <= push_back:
+                    self.send_response(status)
+                    body = b'{"detail":"slow down"}'
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(body)))
+                    self.send_header("retry-after", "0.01")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if fail_after is not None and number > fail_after:
                     return self.answer(401, {"detail": "no"})
                 names = [name for name in asked["state"] if name.startswith("item_")]
@@ -1577,3 +1586,40 @@ def test_a_ridiculous_retry_after_is_refused_rather_than_slept_on():
 
     with pytest.raises(JevError, match="longer than"):
         _http2._backoff(0, "3600")
+
+
+@both_transports
+def test_a_retry_records_what_pushed_it_back(transport):
+    """
+    A retry count that cannot say why generates mysteries. The headline benchmark
+    took 245 of them and kept no record of whether they were 429s, 529s or a
+    dropped connection, so it can never be settled.
+    """
+    server = Answering(push_back=3, status=429)
+    client = a_real_client(server.url, transport, pack=4, workers=1)
+    try:
+        answers = client.classify([f"item {n}" for n in range(8)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+
+    assert len(answers) == 8
+    assert all(a.ok for a in answers)
+    assert client.usage.retries == 3
+    assert client.usage.pushback == {429: 3}, client.usage.pushback
+    assert client.usage.waited > 0.0
+    assert "429" in client.usage.why_retried
+    assert "429" in str(client.usage)
+
+
+@both_transports
+def test_each_status_is_counted_under_itself(transport):
+    """A 503 and a 429 are different problems and should not share a bucket."""
+    server = Answering(push_back=2, status=503)
+    client = a_real_client(server.url, transport, pack=4, workers=1)
+    try:
+        client.classify([f"item {n}" for n in range(8)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert client.usage.pushback == {503: 2}, client.usage.pushback

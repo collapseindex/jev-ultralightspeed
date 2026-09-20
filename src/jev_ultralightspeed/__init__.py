@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.10.5"
+__version__ = "0.11.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -134,6 +134,8 @@ class Usage:
     items: int = 0
     requests: int = 0            # requests that came back with an answer
     retries: int = 0             # attempts that failed and were sent again
+    pushback: dict = field(default_factory=dict)   # what the retries were, by status code
+    waited: float = 0.0          # seconds spent sitting out a backoff
     input_tokens: int = 0
     output_tokens: int = 0
     cached: int = 0
@@ -167,10 +169,20 @@ class Usage:
     def usd(self) -> float:
         return self.input_tokens * self.USD_PER_MILLION_INPUT / 1e6
 
+    @property
+    def why_retried(self) -> str:
+        """The retries by status, so a slow run can say what slowed it."""
+        if not self.pushback:
+            return ""
+        parts = [f"{count}x{'transport' if status == 0 else status}"
+                 for status, count in sorted(self.pushback.items())]
+        return f"{', '.join(parts)}, {self.waited:.1f}s waiting"
+
     def __str__(self) -> str:
         retried = f", {self.retries} retried" if self.retries else ""
         retried += f", {self.resumed} resumed" if self.resumed else ""
         retried += f", {self.skipped} skipped" if self.skipped else ""
+        retried += f" ({self.why_retried})" if self.pushback else ""
         asked = "" if self.answered == self.items else f" of {self.items}"
         return (f"{self.answered}{asked} items in {self.seconds:.2f}s "
                 f"({self.items_per_second:.1f}/s, {self.requests} requests{retried}, "
@@ -358,14 +370,14 @@ class Client:
                 if answer.status not in RETRY_STATUSES or attempt == MAX_RETRIES - 1:
                     raise JevError(f"Jev answered {answer.status}: "
                                    f"{payload.decode('utf-8', 'replace')[:300]}")
-                self._count_retry()
                 wait = _http2._backoff(attempt, hint)
+                self._count_retry(answer.status, wait)
             except (http.client.HTTPException, socket.error, ssl.SSLError, TimeoutError) as error:
                 self._drop_connection()
                 if attempt == MAX_RETRIES - 1:
                     raise JevError(f"could not reach Jev: {error}") from error
-                self._count_retry()
                 wait = _http2._backoff(attempt, None)
+                self._count_retry(0, wait)
             time.sleep(wait)                    # jittered, and the server's hint when it gave one
         raise JevError("out of retries")
 
@@ -834,9 +846,19 @@ class Client:
             self._ledgers[path] = Ledger(path, self.model)
         return self._ledgers[path]
 
-    def _count_retry(self) -> None:
+    def _count_retry(self, status: int = 0, waited: float = 0.0) -> None:
+        """
+        One attempt that will be sent again, and why.
+
+        A count on its own generates mysteries: the headline benchmark took 245 of
+        these and the run kept no record of whether they were 429s, 529s or a
+        dropped connection, so it could never be settled afterwards. Status 0 is
+        anything that never got an answer.
+        """
         with self._books:
             self.usage.retries += 1
+            self.usage.pushback[status] = self.usage.pushback.get(status, 0) + 1
+            self.usage.waited += waited
 
     def _shape(self, instructions: str, criteria, options) -> tuple:
         """

@@ -204,6 +204,7 @@ class Pipe:
             if run.broken:
                 raise JevError(run.broken)          # abandoned before this one even waited
             wait = None
+            pushed = 0
             # The ceiling is taken before the slot, so a request waiting for
             # the rate limit is not sitting on one of the few in-flight slots.
             async with self._gate:
@@ -227,14 +228,16 @@ class Pipe:
                     if answer.status_code not in self.retry_statuses or attempt == self.max_retries - 1:
                         raise JevError(f"Jev answered {answer.status_code}: {answer.text[:300]}")
                     wait = _backoff(attempt, answer.headers.get("retry-after"))
+                    pushed = answer.status_code
                 except httpx.HTTPError as error:
                     if on_timing:
                         on_timing((time.monotonic() - started) * 1000)
                     if attempt == self.max_retries - 1:
                         raise JevError(f"could not reach Jev: {error}") from error
                     wait = _backoff(attempt, None)
+                    pushed = 0
             if on_retry:
-                on_retry()
+                on_retry(pushed, wait)
             await asyncio.sleep(wait)               # the slot is free while this waits
         raise JevError("out of retries")
 
