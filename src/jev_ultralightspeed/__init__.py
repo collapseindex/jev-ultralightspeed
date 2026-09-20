@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.10.4"
+__version__ = "0.10.5"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -141,7 +141,10 @@ class Usage:
     skipped: int = 0             # items with no readable answer, under on_error="skip"
     seconds: float = 0.0
 
-    USD_PER_MILLION_INPUT = 0.042        # TypeSafe's published price
+    # TypeSafe publishes a price per million input tokens and this counts those.
+    # Output is about twenty tokens an item, measured, roughly 5% of the total; if
+    # it is billed separately then `usd` is low by whatever that costs.
+    USD_PER_MILLION_INPUT = 0.042
 
     @property
     def answered(self) -> int:

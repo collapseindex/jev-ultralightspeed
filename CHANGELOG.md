@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.10.5 (2026-09-20)
+
+No library change. Once the question stopped being repeated per item, nearly everything left in the
+bill is the items themselves, so this is about those. They also cap the pack, since a request is
+limited by what fits in the state and depth is what one unit of the rate limit buys, so a shorter item
+is cheaper twice over.
+
+### Added
+- `bench_trim.py`: the pod's completions cut to several lengths, both ends, 2,694 judgements an arm,
+  thresholds chosen on one half of the completions and measured on the other. About 15 cents.
+
+### Measured
+- **Trimming to 500 characters is worth it on this pod.** 0.8 points of raw agreement, the same 80%
+  coverage at a 97% bar, a third off the cost per trusted item, and more than double the pack that
+  fits. Trimming to 1,000 is free: 89.7% against 89.4% for the whole thing.
+- **Below that it does not degrade, it falls over, and not monotonically.** At 300 characters agreement
+  is **37.3%**, worse than always answering "compliance" (57.7% of this pod), while 150 characters
+  scores 57.3%. The reason is in what each answered: at 150 there is no signal so it falls back on the
+  commonest label and lands on the base rate, and at 300 there is a *misleading* one, because the
+  opening of a completion often reads like the start of a refusal, and it answered "refusal" 94% of the
+  time. A partial input is worse than a tiny one.
+- **The signal is not at the front.** The last 300 characters score 74.8% against 37.3% for the first
+  300, a 37 point difference for the same number of characters.
+- **Triage caught the cliff.** On the broken arms mean `p` fell from 0.94 to 0.57 and no threshold
+  reached the bar, so coverage came back zero: trust none of this. A different failure from the one
+  `triage` was measured against, and it held.
+
+### Corrected
+- **There is no prompt caching to exploit**, checked rather than assumed: the same body sent twice
+  billed 2,346 input tokens both times, and `usage` carries only `input_tokens` and `output_tokens`.
+- **Output is about twenty tokens per item, not per request.** The README had it per request, which is
+  out by the pack depth. Measured at 148 tokens for a request of eight.
+- `Usage.usd` counts input tokens at the published price, which is the price TypeSafe publishes. If
+  output is billed separately every dollar figure in this repo is low by whatever that costs. Output is
+  about 5% of the tokens on this pod. Now said in the code and the README rather than assumed.
+
+111 tests, no key and no network needed.
+
 ## v0.10.4 (2026-09-20)
 
 No library change. Three claims from the last release, weakened to what the evidence supports. A
