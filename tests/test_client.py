@@ -1623,3 +1623,24 @@ def test_each_status_is_counted_under_itself(transport):
         client.close()
         server.close()
     assert client.usage.pushback == {503: 2}, client.usage.pushback
+
+
+def test_several_clients_can_hold_one_ceiling_between_them():
+    """
+    Two clients taking turns with a limiter each would let the pair send twice what
+    either is allowed, which is what made the headline benchmark's two arms hard to
+    compare. A shared limiter is also the hook for a ceiling held across machines.
+    """
+    shared = _Limiter(6)
+    one = Fake(limiter=shared)
+    two = Fake(limiter=shared)
+    assert one._limiter is two._limiter
+    assert all(one._limiter.try_take() == 0.0 for _ in range(3))
+    assert all(two._limiter.try_take() == 0.0 for _ in range(3))
+    assert one._limiter.try_take() > 0.0, "the pair went over the shared ceiling"
+    assert two._limiter.try_take() > 0.0
+
+
+def test_a_client_without_one_gets_its_own():
+    first, second = Fake(), Fake()
+    assert first._limiter is not second._limiter

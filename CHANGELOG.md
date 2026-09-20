@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.12.0 (2026-09-20)
+
+The headline benchmark had a confound, and every benchmark written since found it by not having one.
+
+### Fixed
+- **`bench_eval.py` ran its two arms one after the other.** The unpacked arm needs 30,000 requests, so
+  it held the floor for half an hour before the packed arm started, and the packed arm then took 245
+  retries against the other's 1. That is the whole of its throughput shortfall, and there was no way to
+  tell a property of packing from the service having had enough of us. The arms now take ten turns each
+  in alternating blocks, with a coin toss for who starts, so drift lands on both.
+- **The arms were identified by which was faster.** A dry run against a local server had the unpacked
+  arm come out ahead, which silently swapped the two labels and every number downstream of them. They
+  go by name now. Found by dry-running a 35 minute benchmark against a fake server before paying for
+  it, which is worth doing.
+- The benchmark reports `usage.pushback`, so if the retries come back it will say what they were.
+
+### Added
+- **`limiter=`** on `Client`. Anything with `take()` and `try_take()` will do, which is how several
+  clients hold one ceiling between them. Two arms taking turns with a limiter each would let the pair
+  send twice what either is allowed, which is the thing the benchmark is supposed to be holding
+  constant, and the same hook takes a window held in Redis across machines. This library does not ship
+  one of those, it gets out of the way of it.
+
+117 tests, no key and no network needed.
+
 ## v0.11.0 (2026-09-20)
 
 ### Added

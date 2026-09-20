@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client, REQUESTS_PER_MINUTE, _Limiter                                   # noqa: E402
 
 # dinostomp's xstest-refusal pod: 1,347 completions labelled by two human
 # annotators. Clone it beside this repo, or point ITEMS somewhere else.
@@ -80,14 +80,34 @@ def by_item(labels, gold, source, unique):
     return [statistics.mean(hits[index]) for index in range(unique) if hits[index]]
 
 
-def arm(name, texts, gold, source, unique, *, pack, workers):
-    """One pass over the items, and everything measured about it."""
-    client = Client(pack=pack, workers=workers, cache=False)
+BLOCKS = 10                      # each arm takes its turn this many times
+
+
+def arm(name, texts, gold, source, unique, *, pack, workers, limiter, blocks=BLOCKS):
+    """
+    One arm's worth of judgements, taken in turns rather than in one go.
+
+    The first version of this ran the arms one after the other, and since the
+    unpacked arm needs 30,000 requests it held the floor for half an hour before
+    the packed one started. The packed arm then took 245 retries against the
+    other's 1, which is the whole of its throughput shortfall, and there was no
+    way to tell a property of packing from the service having had enough of us.
+    Ten turns each, alternating, so drift lands on both.
+    """
+    # One ceiling between the two arms. With a limiter each, taking turns would
+    # let the pair send more a minute than either is allowed, which is the thing
+    # the benchmark is supposed to be holding constant.
+    client = Client(pack=pack, workers=workers, cache=False, limiter=limiter)
     client.warm()
-    started = time.monotonic()
-    labels = [answer.label for answer in
-              client.stream(iter(texts), INSTRUCTIONS, options=OPTIONS, chunk=5_000)]
-    seconds = time.monotonic() - started
+    size = len(texts) // blocks + 1
+    labels, seconds = [], 0.0
+    for start in range(0, len(texts), size):
+        piece = texts[start:start + size]
+        began = time.monotonic()
+        labels.extend(answer.label for answer in
+                      client.stream(iter(piece), INSTRUCTIONS, options=OPTIONS, chunk=5_000))
+        seconds += time.monotonic() - began
+        yield None                        # the other arm's turn
     client.close()
 
     per_item = by_item(labels, gold, source, unique)
@@ -102,9 +122,12 @@ def arm(name, texts, gold, source, unique, *, pack, workers):
     print(f"{name:<22}{len(texts) / seconds:>9.1f}{seconds:>9.1f}s{client.usage.requests:>9,}"
           f"{client.usage.retries:>8,}{client.usage.usd:>9.3f}{accuracy * 100:>9.1f}%"
           f"{f'{low * 100:.1f}-{high * 100:.1f}':>13}{steady * 100:>10.1f}%")
+    if client.usage.pushback:
+        print(f"{'':<22}pushback: {client.usage.why_retried}")
     return {"name": name, "rate": len(texts) / seconds, "usd": client.usage.usd,
             "per_item": per_item, "accuracy": accuracy, "seconds": seconds,
-            "requests": client.usage.requests, "retries": client.usage.retries}
+            "requests": client.usage.requests, "retries": client.usage.retries,
+            "pushback": dict(client.usage.pushback), "waited": client.usage.waited}
 
 
 def main():
@@ -114,8 +137,27 @@ def main():
     unique = len(set(source))
     print(f"{'arm':<22}{'items/s':>9}{'wall':>10}{'requests':>9}{'retried':>8}"
           f"{'$':>9}{'accuracy':>10}{'95% (item)':>13}{'steady':>10}")
-    slow = arm("regular jev", texts, gold, source, unique, pack=1, workers=8)
-    fast = arm("jev-ultralightspeed", texts, gold, source, unique, pack=32, workers=8)
+    # Both arms as generators, taking turns, so neither owns a stretch of the
+    # clock the other never sees.
+    shared = _Limiter(REQUESTS_PER_MINUTE)
+    turns = [arm("regular jev", texts, gold, source, unique, pack=1, workers=8,
+                 limiter=shared),
+             arm("jev-ultralightspeed", texts, gold, source, unique, pack=32, workers=8,
+                 limiter=shared)]
+    random.shuffle(turns)                       # and whoever goes first is a coin toss
+    done = []
+    while turns:
+        for runner in list(turns):
+            try:
+                next(runner)
+            except StopIteration as finished:
+                done.append(finished.value)
+                turns.remove(runner)
+    # By name, not by speed. A dry run against a local server had the unpacked arm
+    # come out faster, which silently swapped the two labels and every number that
+    # depends on which is which.
+    slow = next(result for result in done if result["name"] == "regular jev")
+    fast = next(result for result in done if result["name"] == "jev-ultralightspeed")
 
     # Paired, because both arms judged the same completions: the quantity of
     # interest is the difference per completion, not two separate averages.

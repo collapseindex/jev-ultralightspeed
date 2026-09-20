@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.11.0** · Apache-2.0 · no required dependencies
+**v0.12.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -299,6 +299,7 @@ it is not: `p` is the probability of **yes**, so 0.01 is a confident no. Rank by
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
 | `paced` | False | spread requests evenly instead of letting a minute's worth go at once. Only useful against a service that throttles short bursts, and see below before turning it on. |
+| `limiter` | its own | hand several clients one ceiling to share. Anything with `take()` and `try_take()` does, so a window held in Redis across machines drops straight in. This library does not ship one of those, it gets out of the way. |
 | `cache` | True | answer repeats from memory, keyed by model, question and text. |
 | `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
 | `model` | `jev-latest` | passed straight through. |
@@ -673,7 +674,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 115 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 117 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls

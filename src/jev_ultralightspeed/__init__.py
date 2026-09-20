@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -259,6 +259,7 @@ class Client:
         transport: str = "auto",
         verify: str | os.PathLike | ssl.SSLContext | None = None,
         guidance: str = "repeat",
+        limiter=None,
     ) -> None:
         self.key = key or os.environ.get("TYPESAFE_API_KEY", "")
         if not self.key:
@@ -303,7 +304,13 @@ class Client:
         self.failures: list[Answer] = []   # items skipped under on_error="skip"
         self.latencies: list[float] = []
         self.http_version = ""             # what the connection actually negotiated
-        self._limiter = _Limiter(requests_per_minute, paced=paced)
+        # A ceiling of its own unless it is handed one. Anything with `take()` and
+        # `try_take()` will do, which is how several clients hold one budget between
+        # them: two in one process for a fair benchmark, or a Redis window shared by
+        # machines. This library does not ship the second kind, it just gets out of
+        # the way of it.
+        self._limiter = limiter if limiter is not None else _Limiter(requests_per_minute,
+                                                                     paced=paced)
         self.usage = Usage()
 
     # -- the one call ------------------------------------------------------
