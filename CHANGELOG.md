@@ -1,6 +1,8 @@
 # Changelog
 
-## v0.1.0 (2026-09-19)
+## v0.1.0 (2026-09-20)
+
+On PyPI: `pip install "jev-ultralightspeed[fast]"`
 
 First release.
 

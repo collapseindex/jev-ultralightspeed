@@ -47,8 +47,9 @@ arms, identical but for the shape of the requests. This is not Jev against anoth
 30,000 judgements behind each figure and the intervals sitting on top of each other.
 
 ```bash
-pip install "jev-ultralightspeed[fast]"
-git clone https://github.com/collapseindex/dinostomp.git ../dinostomp
+git clone https://github.com/collapseindex/jev-ultralightspeed.git
+git clone https://github.com/collapseindex/dinostomp.git
+cd jev-ultralightspeed && pip install "jev-ultralightspeed[fast]"
 TYPESAFE_API_KEY=... python bench_eval.py            # about 13 minutes, about $1.20
 ```
 
@@ -93,18 +94,10 @@ Nothing clever. Four things the obvious loop does not do, in order of how much t
 ## Install
 
 ```bash
-pip install "jev-ultralightspeed[fast] @ git+https://github.com/collapseindex/jev-ultralightspeed"
+pip install "jev-ultralightspeed[fast]"     # httpx and h2: about twice as fast
+pip install jev-ultralightspeed             # standard library only, still works
 export TYPESAFE_API_KEY=...
 ```
-
-The `[fast]` extra pulls in httpx and h2, which measured about twice the standard library path.
-Without it the client still works on the standard library alone:
-
-```bash
-pip install "git+https://github.com/collapseindex/jev-ultralightspeed"
-```
-
-Not on PyPI yet.
 
 ## Use
 
