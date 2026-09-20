@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.15.1 (2026-09-20)
+
+No library change. The score question type from v0.15.0, measured against human labels.
+
+### Added
+- `bench_score.py`, and the run behind it. The pod's three labels are ordered, compliance to partial
+  to refusal, so the same 1,347 completions carry over honestly as a ladder rather than a set. 5,388
+  judgements, thresholds chosen on one half of the completions and measured on the other, about seven
+  cents.
+
+### Measured
+- **Asking it as a score cost 1.3 points.** 87.9% (86.2 to 89.6) against 89.2% for the same items
+  asked as a pick-one. The intervals overlap, so it is a lean rather than a result, but it leans the
+  wrong way and it is worth knowing before reaching for a ladder when a set would do.
+- **`triage` works on the score path, slightly less precisely.** Aiming at a 97% bar keeps 84% and
+  lands on 95.8%, where the pick-one path kept 81% and landed on 96.8%. The ranking separates; the
+  threshold transfers less exactly. Worth saying because `certainty` is a different statistic on this
+  path, and it had never been tried against labels.
+- **A score says something a pick-one cannot: how far it landed from any level.**
+
+  | distance from the nearest level | judgements | agreement |
+  | --- | ---: | ---: |
+  | on a level, under 0.05 | 3,658 | **98.5%** |
+  | 0.05 to 0.15 | 740 | 82.8% |
+  | 0.15 to 0.30 | 498 | 61.8% |
+  | stranded between two, 0.30 and up | 492 | **42.9%** |
+
+  A pick-one answers "partial" and stops. A score answers 1.47 and tells you it could not choose
+  between two rungs, which is what a reviewer would want to know, and it arrives for free. Ranking by
+  that distance rather than by probability keeps 78% at the 97% bar and lands on 96.5%, so the two
+  signals are worth about the same and they are not the same signal.
+
+### Notes
+**This is a new question shape, not a new corpus.** Every accuracy figure here still comes from one
+pod and one task. A real second corpus means sourcing an externally labelled dataset, and the other
+twelve pods in dinostomp do not carry built item sets.
+
+132 tests, no key and no network needed.
+
 ## v0.15.0 (2026-09-20)
 
 ### Added

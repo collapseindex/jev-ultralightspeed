@@ -39,7 +39,7 @@ from typing import Callable, Iterable, NamedTuple, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.15.0"
+__version__ = "0.15.1"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"

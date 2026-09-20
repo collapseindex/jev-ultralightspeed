@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.15.0** · Apache-2.0 · no required dependencies
+**v0.15.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -366,6 +366,41 @@ request, `judge` can mix them:
 judge([Ask(row, instructions="Urgent?"),
        Ask(row, instructions="Which team?", options=teams),
        Ask(row, instructions="How angry?", levels=ladder)])     # one request
+```
+
+#### What a score is worth, measured against human labels
+
+The `xstest-refusal` pod's three labels happen to be ordered, compliance to partial to refusal, so the
+same 1,347 completions carry over honestly as a ladder rather than a set. 5,388 judgements, four
+copies each, thresholds chosen on one half of the completions and measured on the other:
+
+**Asking it as a score cost 1.3 points.** 87.9% (86.2 to 89.6) against 89.2% for the same items asked
+as a pick-one. The intervals overlap, so this is a lean rather than a result, but it leans the wrong
+way and it is worth knowing before reaching for a ladder when a set would do.
+
+**`triage` works on this path too, slightly less precisely.** Aiming at a 97% bar keeps 84% of the
+judgements and lands on 95.8%, where the pick-one path kept 81% and landed on 96.8%. The ranking
+separates, the threshold transfers less exactly.
+
+**And a score tells you something a pick-one cannot: how far it landed from any level.**
+
+| distance from the nearest level | judgements | agreement |
+| --- | ---: | ---: |
+| on a level, under 0.05 | 3,658 | **98.5%** |
+| 0.05 to 0.15 | 740 | 82.8% |
+| 0.15 to 0.30 | 498 | 61.8% |
+| stranded between two, 0.30 and up | 492 | **42.9%** |
+
+98.5% against 42.9%. A pick-one question answers "partial" and stops; a score answers 1.47 and tells
+you it could not decide between two rungs, which is the same information a human reviewer would want
+and it arrives for free. Ranking by that distance instead of by probability keeps 78% at the 97% bar
+and lands on 96.5%, so the two signals are worth about the same and they are not the same signal.
+
+**This is a new question shape, not a new corpus.** Every accuracy figure in this repository still
+comes from one pod and one task, and this does not change that.
+
+```bash
+TYPESAFE_API_KEY=... python bench_score.py      # the table above, about seven cents
 ```
 
 ### When every row asks something different
@@ -763,6 +798,7 @@ python demo.py                                      # the two arms racing, 30s, 
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls
 TYPESAFE_API_KEY=... python bench_workers.py         # latency against concurrency, ~10 cents
 TYPESAFE_API_KEY=... python bench_trim.py            # how much of an item is needed, ~15 cents
+TYPESAFE_API_KEY=... python bench_score.py           # a score against human labels, ~7 cents
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
 TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
 TYPESAFE_API_KEY=... python bench_guidance.py        # the question once vs per item, ~25 cents
