@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.10.0 (2026-09-20)
+
+Tuning for throughput alone stopped being the right objective when `triage` arrived, because `triage`
+buys accuracy with coverage. What a shape is worth is what it delivers past a quality bar:
+
+    trusted items a second = items a second x the share you can keep at the target
+
+### Changed
+- **The default `pack` is 32, raised from 8.** `bench_tuning.py` prices eight shapes over 21,552
+  judgements on `xstest-refusal`, thresholds chosen on one half of the completions and measured on the
+  other, arms in a random order. At a 97% bar:
+
+  | pack | items/s under the ceiling | kept at 97% | trusted items/s |
+  | ---: | ---: | ---: | ---: |
+  | 8 | 133 | 75% | 100 |
+  | 16 | 267 | 78% | 208 |
+  | **32** | **533** | **77%** | **409** |
+  | 64 | 1,067 | 79% | 848 |
+
+  Depth is nearly free, which was the open question. If packing made each verdict shakier, coverage
+  would fall as depth rose and the trusted column would flatten. Coverage goes from 75% to 79% between
+  8 and 64, and raw agreement moves 0.2 points.
+
+  **This changes answers and invalidates existing checkpoints**, because `pack` is part of the key on
+  purpose. A v0.9.x checkpoint read by v0.10.0 will find nothing and ask everything again. Pass
+  `pack=8` to keep what you had.
+
+### Added
+- `bench_tuning.py`, and the run behind the table, committed, so the analysis can be redone with no
+  key and no spending.
+
+### Corrected
+- **No position effect is detectable at any depth.** Front half of a request against back half, which
+  is the same two-way comparison whatever the depth: −1.6, −1.2, +0.5, +0.2, −1.4, −1.3, +1.5 and +1.3
+  points across the eight shapes, either side of zero and all within about one standard error. The
+  first version of this analysis reported a spread that grew with depth, which was an artifact of
+  comparing the widest gap between four bands with the widest between eight. More bands means a wider
+  widest gap whatever the data says. Caught before publishing, unlike the last one.
+- **The throughput column is what the request ceiling allows, not what the benchmark clocked.** Every
+  arm is short enough that the limiter's sixty second window never fills, so all of them burst above
+  their own sustained rate: the `pack=8` arm ran at 2,087 requests a minute against a 1,000 ceiling.
+  Quoting those as throughput would have been the same mistake as the 15.9x withdrawn in v0.2.0.
+- `guidance="once"` costs 0.2 to 0.5 points of raw agreement at all four depths tried, in the same
+  direction every time, which lines up with the paired −0.20 measured in v0.8.0. Coverage is unchanged.
+
+96 tests, no key and no network needed.
+
 ## v0.9.1 (2026-09-20)
 
 A review measured the client's own work rather than the API's and found a third of it going on the

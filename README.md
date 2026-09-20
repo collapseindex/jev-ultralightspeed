@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.9.1** · Apache-2.0 · no required dependencies
+**v0.10.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -207,7 +207,7 @@ export TYPESAFE_API_KEY=...
 ```python
 from jev_ultralightspeed import Client
 
-client = Client(pack=8, workers=8)     # the defaults are pack=8, workers=4
+client = Client(pack=32, workers=8)    # the defaults are pack=32, workers=4
 client.warm()                          # open the connections before the work arrives
 
 answers = client.classify(
@@ -245,7 +245,7 @@ agreement rate. See [Knowing which verdicts to trust](#knowing-which-verdicts-to
 
 | argument | default | what it does |
 | --- | --- | --- |
-| `pack` | 8 | items per request, and the whole ballgame: it decides how many items one unit of the rate limit buys. Higher is faster and cheaper per item, and slower per request. |
+| `pack` | 32 | items per request, and the whole ballgame: it decides how many items one unit of the rate limit buys. Raised from 8 in v0.10.0 on the measurement in [What to set](#what-to-set). Use `pack=1` for adversarial text. |
 | `workers` | 4 | requests in flight. |
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
@@ -268,6 +268,52 @@ plus the longest question, and `pack` counts items, so several individually lega
 illegal request. Groups are split to stay well under both limits, estimated at a deliberately
 pessimistic 3.5 characters per token against 3.92 measured on a live packed request. Short items are
 unaffected and still pack to `pack`.
+
+### What to set
+
+Tuning for throughput alone stopped being the right objective the moment `triage` existed, because
+`triage` buys accuracy with coverage. What a shape is worth is what it delivers **past a quality
+bar**:
+
+    trusted items a second = items a second x the share you can keep at the target
+
+`bench_tuning.py` prices eight shapes that way over 21,552 judgements on the `xstest-refusal` pod,
+thresholds chosen on one half of the completions and measured on the other, arms run in a random
+order. At a 97% bar, which is the annotators' own agreement rate:
+
+| pack | items/s under the ceiling | kept at 97% | **trusted items/s** | $ per 1,000 trusted |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 133 | 75% | 100 | 0.020 |
+| 16 | 267 | 78% | 208 | 0.019 |
+| **32** | **533** | **77%** | **409** | **0.019** |
+| 64 | 1,067 | 79% | 848 | 0.018 |
+
+**Depth is nearly free, and that was the open question.** The worry about packing has always been
+that it makes each verdict shakier. If it did, coverage would fall as depth rose and the trusted
+column would flatten. It does not: coverage moves from 75% to 79% going from 8 to 64, and raw
+agreement moves 0.2 points (89.1% to 88.9%). So the default is `pack=32`, and 64 is there if your
+items are short enough to fit it.
+
+Those throughput figures are **what the request ceiling allows**, `pack x 1000/60`, not what the
+benchmark clocked. Each arm is short enough that the limiter's sixty second window never fills, so
+every one of them burst above its own sustained rate: the `pack=8` arm ran at 2,087 requests a
+minute. A long job cannot.
+
+**No position effect is detectable at any depth.** Comparing the front half of a request against the
+back half, which is the same two-way comparison whatever the pack depth, the gaps are −1.6, −1.2,
++0.5, +0.2, −1.4, −1.3, +1.5 and +1.3 points across the eight shapes: either side of zero, all within
+about one standard error. An earlier version of this section reported a spread that grew with depth,
+which was an artifact of comparing the widest gap between four bands against the widest between eight.
+More bands means a wider widest gap whatever the data says.
+
+**`guidance="once"` costs a little, consistently.** Raw agreement is lower in all four depths tried,
+by 0.2 to 0.5 points, which lines up with the paired −0.20 measured separately. Coverage is
+unchanged. Worth it when the question is long relative to the items, not otherwise.
+
+```bash
+TYPESAFE_API_KEY=... python bench_tuning.py        # eight shapes, ~35 cents
+python bench_tuning.py --analyse data/results/<file>
+```
 
 ### Knowing which verdicts to trust
 

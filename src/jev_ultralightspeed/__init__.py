@@ -39,14 +39,19 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
 
-# Measured, not guessed: eight items per request was the sweet spot, and four
-# requests in flight kept latency flat. See bench.py, which reproduces it.
-PACK = 8
+# Measured, not guessed, and remeasured against the objective that matters.
+# bench_tuning.py prices eight shapes by trusted items a second, which is
+# throughput times the share of verdicts you can keep at a quality bar. At a 97%
+# bar, pack=32 delivers 409 of them a second against pack=8's 100, coverage
+# barely moves with depth (77% against 75%), and no position effect is detectable
+# at any depth. Four requests in flight keeps latency flat and the request ceiling
+# binds long before more of them would help.
+PACK = 32
 WORKERS = 4
 
 # TypeSafe publishes 1,200 requests a minute. Stay under it by default.
