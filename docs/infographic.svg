@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>18x faster and 41% cheaper Jev classification, at the same accuracy</title>
+  <desc>Classifying with TypeSafe's Jev: 18 times the throughput and 41 percent less money than one request per item, with agreement against human labels unchanged. A million items took 14.7 minutes and $4.99 over 31,400 requests.</desc>
+
+  <defs>
+    <linearGradient id="streak" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7cb6ff" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#7cb6ff" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="fast" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4c8dff"/>
+      <stop offset="100%" stop-color="#7cb6ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="675" fill="#161618"/>
+  <g opacity="0.45">
+    <rect x="0" y="120" width="620" height="2" fill="url(#streak)"/>
+    <rect x="150" y="168" width="470" height="1" fill="url(#streak)"/>
+    <rect x="330" y="86" width="290" height="1" fill="url(#streak)"/>
+    <rect x="60" y="212" width="560" height="1" fill="url(#streak)"/>
+  </g>
+
+  <!-- the deltas, first and biggest -->
+  <g transform="translate(64, 92)">
+    <text x="0" y="0" fill="#7cb6ff" font-size="112" font-weight="800" letter-spacing="-3">18x FASTER</text>
+    <text x="0" y="96" fill="#f2f2f4" font-size="112" font-weight="800" letter-spacing="-3">41% CHEAPER</text>
+    <text x="0" y="140" fill="#a3a3ac" font-size="19">Same question, same items, same answers. Only the shape of the requests changes.</text>
+  </g>
+
+  <line x1="64" y1="286" x2="1136" y2="286" stroke="#38383d" stroke-width="1"/>
+
+  <!-- what that looked like on a real eval -->
+  <g transform="translate(64, 326)">
+    <text x="0" y="0" fill="#a3a3ac" font-size="12" font-weight="700" letter-spacing="1.6">MEASURED ON 1,347 HUMAN-LABELLED ITEMS (XSTEST, VIA DINOSTOMP)</text>
+    <g transform="translate(0, 34)">
+      <text x="0" y="14" fill="#a3a3ac" font-size="14">one at a time</text>
+      <rect x="150" y="0" width="45" height="26" rx="4" fill="#2a2a2e"/>
+      <text x="207" y="19" fill="#f2f2f4" font-size="16">41 items/s</text>
+      <text x="380" y="19" fill="#a3a3ac" font-size="16">$0.032</text>
+      <text x="500" y="19" fill="#a3a3ac" font-size="16">89.5% agreement with the humans</text>
+    </g>
+    <g transform="translate(0, 76)">
+      <text x="0" y="14" fill="#7cb6ff" font-size="14" font-weight="700">packed</text>
+      <rect x="150" y="0" width="810" height="26" rx="4" fill="url(#fast)"/>
+      <text x="164" y="19" fill="#0b2545" font-size="16" font-weight="700">739 items/s</text>
+      <text x="380" y="19" fill="#0b2545" font-size="16" font-weight="700">$0.019</text>
+      <text x="500" y="19" fill="#0b2545" font-size="16" font-weight="700">90.7% agreement with the humans</text>
+    </g>
+  </g>
+
+  <!-- the scale proof -->
+  <g transform="translate(64, 486)">
+    <text x="0" y="0" fill="#a3a3ac" font-size="12" font-weight="700" letter-spacing="1.6">AND IT HOLDS AT SCALE</text>
+    <text x="0" y="42" fill="#f2f2f4" font-size="34" font-weight="700">1,000,000 decisions · 14.7 minutes · $4.99 · zero errors</text>
+    <text x="0" y="70" fill="#a3a3ac" font-size="15">31,400 requests instead of a million, flat throughput for the whole run, answers streamed to disk.</text>
+  </g>
+
+  <!-- how, and where -->
+  <g transform="translate(64, 606)">
+    <text x="0" y="0" fill="#a3a3ac" font-size="14">pack 32 · 8 in flight · one HTTP/2 connection · never ask twice</text>
+    <text x="0" y="26" fill="#7cb6ff" font-size="14" font-weight="600">github.com/collapseindex/jev-ultralightspeed</text>
+    <text x="1072" y="26" fill="#a3a3ac" font-size="13" text-anchor="end">Apache-2.0 · reproduce it with your own key</text>
+  </g>
+</svg>

@@ -17,6 +17,8 @@ answers = classify(messages, "Does this message need a human today?")
 urgent = [a.item for a in answers if a.yes]
 ```
 
+<img src="docs/infographic.png" alt="18x faster, 41% cheaper, same accuracy; a million decisions in 14.7 minutes for $4.99" width="100%" />
+
 ## A million items
 
 One question, a million support messages, answers streamed straight to a CSV.
