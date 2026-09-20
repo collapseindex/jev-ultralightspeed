@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.7.0** · Apache-2.0 · no required dependencies
+**v0.8.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -147,12 +147,11 @@ It is also not compute-bound. At 441 items/s and 341 tokens an item it is moving
 JSON, so `orjson`, `uvloop` and more cores have nothing to do here. Every remaining lever is about
 permission: fewer tokens, fewer requests, more ceiling, or not asking at all.
 
-**Measured but not shipped.** The question block is repeated once per item inside a packed request,
-which is 74.5% of the body at `pack=32`, and bytes per item are flat across pack depth. Carrying the
-guidance once in `state` instead cut a live 32-item request from **4,598 to 1,777 billed input
-tokens**, a 61% saving, with all 32 answers readable and all 32 labels unchanged. It is not the
-default because it changes the prompt, and a prompt change needs the paired accuracy run before it
-earns that. One request is not an accuracy result.
+**Carrying the question once, `guidance="once"`.** The question block is repeated once per item
+inside a packed request, which is 74.5% of the body at `pack=32`, and bytes per item are flat across
+pack depth. Carrying it once in the state instead cut a live 32-item request from **4,598 to 1,777
+billed input tokens**, a 61% saving, and it is measured rather than estimated. See below for what it
+does to the answers, and why it is not the default.
 
 **The two arms differ by one sentence as well as by shape.** A packed request ends with "Judge
 item_N only, ignoring every other item"; an unpacked one has nothing to disambiguate and so does
@@ -251,6 +250,7 @@ the order you passed the items in, however the requests were shuffled to get the
 | `model` | `jev-latest` | passed straight through. |
 | `url` | the Jev endpoint | point it at a gateway or a mock. |
 | `verify` | the machine's trust store | a CA file or an `ssl.SSLContext`, for a gateway signed by a private CA. Never a boolean: switching verification off is something you should have to write out yourself. |
+| `guidance` | `repeat` | `once` carries the question in the state instead of in every item's question. Large saving on short items, almost none on long ones, and it changes the prompt. See below. |
 
 `client.http_version` says what the connection actually negotiated, `"HTTP/2"` or `"HTTP/1.1"`, after
 the first call. It is worth looking at once. httpx falls back to HTTP/1.1 whenever ALPN does not
@@ -265,6 +265,42 @@ illegal request. Groups are split to stay well under both limits, estimated at a
 pessimistic 3.5 characters per token against 3.92 measured on a live packed request. Short items are
 unaffected and still pack to `pack`.
 
+### Carrying the question once
+
+```python
+client = Client(pack=32, guidance="once")      # the default is "repeat"
+```
+
+A packed request writes the whole question into every item's question. Thirty-two items means
+thirty-two copies of the instructions and the criteria, which at `pack=32` is **74.5% of the body**,
+and it is why bytes per item are flat however deep you pack. `guidance="once"` puts the question in
+the state under one key and has each question point at it. For a pick-one question the option names
+stay where they are, because they are the answer space rather than wording.
+
+**What it saves depends entirely on your items.** The saving is the ratio of question text to item
+text, so it is large when the question is long and the rows are short, and nearly nothing the other
+way around:
+
+| | billed input tokens per item | saving |
+| --- | ---: | ---: |
+| a long yes/no question, short support messages | 143.7 → 55.5 | **61%** |
+| a one-line pick-one question, long model completions | 384.8 → 374.6 | 3% |
+
+**What it costs.** 8,082 judgements over the 1,347 completions in the `xstest-refusal` pod, both arms
+packed 32 deep over the same items in a randomised arm order:
+
+| | the question in every item | the question once |
+| --- | ---: | ---: |
+| agreement with the human labels | 89.3% (87.7 to 90.8) | 89.1% (87.4 to 90.6) |
+| same answer across an item's repeats | 98.2% | 98.1% |
+
+Paired over the completions, once minus repeat is **−0.20 points, 95% −0.41 to +0.01**, and 1.0% of
+individual verdicts move. That is inside the two point margin, so the honest summary is "no
+difference worth caring about at this sample size". But the interval sits almost entirely below zero,
+which is a hint of a real effect of about a fifth of a point against the shared question, and one
+pod's short question is a smaller prompt change than a long one would be. So it is opt in, it is part
+of the cache and checkpoint key, and `bench_guidance.py` reruns the comparison for about 25 cents.
+
 ### Resuming a job that dies
 
 A million rows take a quarter of an hour and thirty thousand requests. Something will eventually
@@ -275,6 +311,22 @@ kind of mistake. Pass a `checkpoint` and it cannot happen:
 for answer in client.stream(rows, question, checkpoint="run.jsonl"):
     writer.writerow([answer.item, answer.label, answer.p])
 ```
+
+`stream()` hands each answer over as the request it rode on lands. `chunk` bounds how much is held in
+memory and how far deduplication looks, not when you hear anything: within a chunk the requests roll,
+and an answer is out as soon as everything before it is known. Only a repeat whose original is still
+in flight waits, and it waits for that one request. With 256 items, one slow request near the end and
+eight workers:
+
+| | first answer, before | first answer, now | whole job |
+| --- | ---: | ---: | ---: |
+| threads | 1.48s | **0.06s** | 1.48s → 1.50s |
+| http2 | 1.68s | **0.23s** | 1.68s → 1.69s |
+
+The job takes the same time, which is the point worth being clear about: this is about when answers
+arrive, not how quickly the work finishes. What it buys is downstream work overlapping the API,
+checkpoint writes spread through the run instead of arriving in 5,000-row jolts, and more banked when
+something kills the process.
 
 Every answer is appended to that file as its request lands. Run the same call again after a crash, a
 kill or a laptop lid, and anything already in the file is not asked again: `client.usage.resumed`
@@ -351,11 +403,12 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 77 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 88 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
 TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
+TYPESAFE_API_KEY=... python bench_guidance.py        # the question once vs per item, ~25 cents
 TYPESAFE_API_KEY=... python soak.py --items 100000   # sustained load, ~50 cents
 ```
 

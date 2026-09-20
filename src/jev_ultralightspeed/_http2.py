@@ -280,6 +280,25 @@ class Pipe:
             self._all(bodies, on_request, on_timing, on_retry, on_done, on_failed), self._loop)
         return future.result()
 
+    def submit(self, body: dict, run, *, on_request: Callable | None = None,
+               on_timing: Callable | None = None, on_retry: Callable | None = None):
+        """
+        One request, as a future the calling thread can wait on.
+
+        `ask_all` is the batch form and it cannot be handed answers one at a
+        time. A rolling pipeline needs this: a bounded number of requests in
+        flight, each landing on its own, so a stream gives answers back as they
+        arrive instead of a chunk at a time. `run` is shared across the pipeline,
+        which is how abandoning one stops the rest.
+        """
+        self._ready.wait(timeout=10)
+        return asyncio.run_coroutine_threadsafe(
+            self._one(body, run, on_request, on_timing, on_retry), self._loop)
+
+    def new_run(self):
+        """A fresh piece of per-pipeline state, for the rolling path."""
+        return _Run()
+
     def warm(self) -> None:
         """Open the connection before any work arrives, on the same budget."""
         async def touch():

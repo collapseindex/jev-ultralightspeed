@@ -1192,3 +1192,138 @@ def test_bringing_your_own_trust_still_offers_http2():
         client.close()
     assert offered, "nobody set ALPN on the caller's own context"
     assert "h2" in offered[0], offered
+
+
+# -- carrying the question once ---------------------------------------------
+
+def test_guidance_once_puts_the_question_in_the_state_and_points_at_it():
+    from jev_ultralightspeed import GUIDANCE, _packed_body
+
+    instructions = "Does this need a human today?"
+    criteria = {"true": "broken now", "false": "can wait"}
+    body = _packed_body("m", ["a", "b", "c"], instructions, criteria, None, "once")
+
+    assert body["state"][GUIDANCE].startswith(instructions)
+    assert "true: broken now" in body["state"][GUIDANCE]
+    assert set(body["state"]) == {"item_1", "item_2", "item_3", GUIDANCE}
+    for name, question in body["questions"].items():
+        assert instructions not in question["instructions"], "the question is still repeated"
+        assert GUIDANCE in question["instructions"]
+        assert name in question["instructions"]
+        assert "criteria" not in question
+
+
+def test_the_option_names_stay_in_every_question():
+    """
+    For a pick-one question the options are the answer space, not wording, so
+    they are not the part that moves.
+    """
+    from jev_ultralightspeed import GUIDANCE, _packed_body
+
+    options = {"yes_please": "a", "no_thanks": "b"}
+    body = _packed_body("m", ["a", "b"], "Which?", None, options, "once")
+    assert body["state"][GUIDANCE] == "Which?"
+    for question in body["questions"].values():
+        assert question["criteria"] == options
+        assert question["type"] == "choice"
+
+
+def test_an_unpacked_request_is_unchanged_by_guidance():
+    """One item has nothing to share the question with."""
+    client = Fake(pack=1, guidance="once")
+    client.classify(["only"], QUESTION)
+    from jev_ultralightspeed import GUIDANCE
+
+    assert GUIDANCE not in client.sent[0]["state"]
+    assert QUESTION in client.sent[0]["questions"]["item_1"]["instructions"]
+
+
+def test_the_shape_of_the_question_is_part_of_the_key():
+    """
+    A different prompt is a different answer, so a cache or a checkpoint must not
+    serve one for the other.
+    """
+    repeated = Fake(pack=4)
+    once = Fake(pack=4, guidance="once")
+    assert (repeated._key("t", QUESTION, None, None)
+            != once._key("t", QUESTION, None, None))
+
+
+def test_guidance_takes_one_of_two_words():
+    with pytest.raises(JevError, match="guidance"):
+        Client(key="k", guidance="hoisted")
+
+
+def test_a_shared_question_still_reads_every_answer():
+    server = Answering()
+    client = a_real_client(server.url, "threads", pack=8, workers=2, guidance="once")
+    try:
+        answers = client.classify([f"item {n}" for n in range(16)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert [a.item for a in answers] == [f"item {n}" for n in range(16)]
+    assert all(a.ok for a in answers)
+    assert server.seen == 2
+
+
+# -- the rolling stream -----------------------------------------------------
+
+@both_transports
+def test_a_stream_hands_back_answers_before_the_chunk_is_done(transport):
+    """
+    It used to classify a whole chunk and only then yield any of it, so the first
+    answer of a 5,000-item chunk waited on all 157 of its requests. Here the last
+    request is the slow one, and everything before it should already be out.
+    """
+    server = Answering(delay=0.02, slow_for="item 63", slow_by=0.6)
+    client = a_real_client(server.url, transport, pack=4, workers=4)
+    arrived = []
+    started = time.monotonic()
+    try:
+        for answer in client.stream(iter(f"item {n}" for n in range(64)), QUESTION, chunk=64):
+            arrived.append((answer.item, time.monotonic() - started))
+    finally:
+        client.close()
+        server.close()
+
+    assert [item for item, _ in arrived] == [f"item {n}" for n in range(64)]
+    assert arrived[0][1] < 0.35, f"the first answer waited {arrived[0][1]:.2f}s"
+    assert arrived[-1][1] > 0.4, "the straggler was not actually slow"
+    assert arrived[0][1] < arrived[-1][1] / 2, arrived[0][1]
+
+
+@both_transports
+def test_a_repeat_waits_for_its_original_and_no_longer(transport):
+    """
+    Deduplication and order pull against each other in a stream: a repeat cannot
+    be answered before the item it copies. It should wait for that one request,
+    not for the rest of the chunk.
+    """
+    server = Answering(delay=0.02)
+    client = a_real_client(server.url, transport, pack=2, workers=2)
+    items = ["first", "second", "first", "third", "second"]
+    try:
+        answers = list(client.stream(iter(items), QUESTION, chunk=8))
+    finally:
+        client.close()
+        server.close()
+
+    assert [a.item for a in answers] == items
+    assert all(a.ok for a in answers)
+    assert client.usage.cached == 2, "the repeats were asked again"
+    assert server.seen == 2, f"{server.seen} requests for three distinct items at pack=2"
+
+
+def test_the_stream_reports_progress_too():
+    server = Answering(delay=0.01)
+    client = a_real_client(server.url, "threads", pack=4, workers=2)
+    seen = []
+    try:
+        list(client.stream(iter(f"item {n}" for n in range(16)), QUESTION, chunk=8,
+                           on_progress=lambda done, total: seen.append((done, total))))
+    finally:
+        client.close()
+        server.close()
+    assert seen, "a stream never said how far along it was"
+    assert seen[-1][0] == seen[-1][1]

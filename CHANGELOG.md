@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.8.0 (2026-09-20)
+
+Two things that were named in the README as known shortcomings and are now done: the question is no
+longer repeated once per item unless you want it to be, and `stream()` no longer holds a chunk's
+answers back until the chunk is finished.
+
+### Added
+- **`guidance="once"`.** A packed request writes the whole question into every item's question, which
+  at `pack=32` is **74.5% of the body** and is why bytes per item are flat however deep you pack. This
+  carries it in the state under one key instead. On a live 32-item request with a long yes/no question
+  that took the billed input from **4,598 tokens to 1,777**, a 61% saving. On the `xstest-refusal`
+  pod, where the completions are long and the question is one line, it saves 3%. The saving is the
+  ratio of question text to item text and nothing else, and the README says so.
+
+  **Measured against the answers, not assumed.** 8,082 judgements over 1,347 completions, both arms
+  packed 32 deep over the same items in a randomised arm order: 89.3% agreement with the human labels
+  the old way, 89.1% the new way, paired difference **−0.20 points, 95% −0.41 to +0.01**, with 1.0% of
+  individual verdicts moving. Inside the two point margin, so "no difference worth caring about at
+  this sample size". But that interval sits almost entirely below zero, which is a hint of a real
+  effect of about a fifth of a point, so it is opt in rather than the default, and it is part of the
+  cache and checkpoint key because a different prompt is a different answer. `bench_guidance.py`
+  reruns it for about 25 cents. Checkpoint format 3.
+
+### Changed
+- **`stream()` rolls instead of waiting for the chunk.** It used to classify a whole chunk and only
+  then yield any of it, so the first answer of a 5,000-item chunk waited on all 157 of its requests.
+  Now `chunk` bounds memory and how far deduplication looks, and answers leave as the requests they
+  rode on land. With 256 items, one slow request near the end and eight workers:
+
+  | | first answer, before | first answer, now | whole job |
+  | --- | ---: | ---: | ---: |
+  | threads | 1.48s | **0.06s** | 1.48s → 1.50s |
+  | http2 | 1.68s | **0.23s** | 1.68s → 1.69s |
+
+  The job takes the same time, and that is the honest summary: this changes when answers arrive, not
+  how fast the work finishes. What it buys is downstream work overlapping the API, checkpoint writes
+  spread through the run rather than arriving in 5,000-row jolts, and more banked if the process dies.
+  A repeat still waits for the original it copies, because order is the promise, but it waits for that
+  one request rather than for the chunk.
+- `classify()` and `stream()` are now the same engine, which reads each payload where it lands, banks
+  in completion order and yields in input order. Durability should not queue behind a straggler and
+  the caller's order is the promise, so those two are deliberately different orders.
+- `stream()` takes `on_progress` too.
+
+### Fixed
+- A found-while-building bug, and a good one: abandoning a run cancelled the requests already in the
+  air, which left their tasks stuck in `cancelling` and the event loop stopped with a pending future
+  behind it. That hung about one run in three. Anything that has not sent is told to stop and raises;
+  anything already sent is given five seconds to come back. The batch path never cancelled a sibling
+  either, and for the same reason.
+
+88 tests, no key and no network needed.
+
 ## v0.7.0 (2026-09-20)
 
 This package claims its fast path is about twice as quick because every request in flight shares one

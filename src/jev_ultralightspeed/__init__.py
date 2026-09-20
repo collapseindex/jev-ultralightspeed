@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -71,6 +71,7 @@ SKIP_FRACTION = 0.01                   # of the items in a call, before skipping
 MIN_SKIP_BUDGET = 5                    # requests' worth, so a small call is not held to 1%
 MAX_FAILURES_KEPT = 1_000              # reported in full; the rest are counted only
 WINDOW_PER_WORKER = 2                  # requests queued per worker, so a straggler is not a wall
+DRAIN_S = 5.0                          # how long an abandoned run waits for what is still in the air
 
 
 class JevError(RuntimeError):
@@ -197,6 +198,7 @@ class Client:
         dedupe: bool = True,
         transport: str = "auto",
         verify: str | os.PathLike | ssl.SSLContext | None = None,
+        guidance: str = "repeat",
     ) -> None:
         self.key = key or os.environ.get("TYPESAFE_API_KEY", "")
         if not self.key:
@@ -209,6 +211,12 @@ class Client:
         # Asking the same text twice is usually waste. It is not waste when the
         # repeat is the measurement, so it can be turned off.
         self.dedupe = dedupe
+        if guidance not in ("repeat", "once"):
+            raise JevError('guidance must be "repeat" or "once"')
+        # Whether the question is written into every item's question or carried
+        # once in the state. "once" is a different prompt, so it is opt in and it
+        # is part of the cache key.
+        self.guidance = guidance
         if transport not in ("auto", "http2", "threads"):
             raise JevError('transport must be "auto", "http2" or "threads"')
         if transport == "http2" and not _http2.available():
@@ -385,7 +393,6 @@ class Client:
         if self._pipe is not None:
             self._pipe.close()
             self._pipe = None
-
     def stream(
         self,
         items: Iterable[str],
@@ -396,16 +403,19 @@ class Client:
         chunk: int = 5_000,
         checkpoint: str | os.PathLike | None = None,
         on_error: str = "raise",
+        on_progress: Callable[[int, int], None] | None = None,
     ):
         """
-        The same work, a chunk at a time, so a million rows cost the memory
-        of one chunk rather than of the job. Each chunk is classified in full
-        and then yielded in order: answers do not arrive one by one the moment
-        each request lands, and the last item of a chunk waits for the rest of
-        that chunk.
+        The same work, answers handed back as the requests they ride on land.
 
             for answer in client.stream(rows, question):
                 writer.writerow([answer.item, answer.label, answer.p])
+
+        `chunk` is how many items are held in memory and how far deduplication
+        looks, not a barrier: within a chunk the requests roll, and an answer is
+        yielded as soon as everything before it is known. Only a repeat whose
+        original is still in flight has to wait, and it waits for that one
+        request rather than for the whole chunk.
 
         The items are taken from any iterable, so they can come off a cursor
         or a file without being read into a list first.
@@ -418,14 +428,12 @@ class Client:
         for item in items:
             batch.append(item)
             if len(batch) >= chunk:
-                yield from self.classify(batch, instructions, criteria=criteria,
-                                         options=options, checkpoint=checkpoint,
-                                         on_error=on_error)
+                yield from self._answers_for(batch, instructions, criteria, options,
+                                             on_progress, checkpoint, on_error)
                 batch = []
         if batch:
-            yield from self.classify(batch, instructions, criteria=criteria,
-                                     options=options, checkpoint=checkpoint,
-                                     on_error=on_error)
+            yield from self._answers_for(batch, instructions, criteria, options,
+                                         on_progress, checkpoint, on_error)
 
     def classify(
         self,
@@ -463,11 +471,25 @@ class Client:
         abandoned and raises, because a wrong key must not be skipped a million
         times over.
         """
+        return list(self._answers_for(items, instructions, criteria, options,
+                                      on_progress, checkpoint, on_error))
+
+    def _answers_for(self, items, instructions, criteria, options,
+                     on_progress, checkpoint, on_error):
+        """
+        The engine both callers share: plan the requests, keep a bounded number
+        of them in flight, bank each one where it lands, and give answers back in
+        the order they were asked for.
+
+        Banking happens in completion order and yielding in input order, on
+        purpose. Durability should not wait behind a straggler, and the caller's
+        order is the promise.
+        """
         if on_error not in ("raise", "skip"):
             raise JevError('on_error must be "raise" or "skip"')
         texts = [_clean(item, index) for index, item in enumerate(items)]
         if not texts:
-            return []
+            return
 
         answers: list[Answer | None] = [None] * len(texts)
         self.last_partial = []
@@ -493,20 +515,17 @@ class Client:
         # The same text twice is one question, answered once.
         first_seen: dict[str, int] = {}
         unique: list[int] = []
-        duplicates: dict[int, int] = {}
+        copies: dict[int, list[int]] = {}
         for index in todo:
             text = texts[index]
             if self.dedupe and text in first_seen:
-                duplicates[index] = first_seen[text]
+                copies.setdefault(first_seen[text], []).append(index)
                 self.usage.cached += 1
             else:
                 first_seen[text] = index
                 unique.append(index)
 
         groups = self._plan(unique, texts, instructions, criteria, options)
-        done = 0
-        started = time.monotonic()
-
         # One budget in items, whether they were lost an item or a request at a
         # time, so "skip" cannot turn a broken run into a million empty answers.
         budget = (max(MIN_SKIP_BUDGET * self.pack, int(len(unique) * SKIP_FRACTION))
@@ -520,149 +539,119 @@ class Client:
             with self._books:
                 given_up[0] += count
                 return given_up[0] <= budget
-        # Inside somebody else's event loop the threaded path is used instead.
-        if groups and self.transport == "http2" and not _http2.in_a_loop():
-            # One connection, every request in flight on it.
-            bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
-                      for g in groups]
 
-            landed: dict[int, list[Answer]] = {}
+        def settle(index: int, answer: Answer) -> None:
+            answers[index] = answer
+            if answer.ok:
+                self._remember(texts[index], instructions, criteria, options, answer)
+            for copy in copies.get(index, ()):
+                answers[copy] = _copy_answer(answer, texts[copy])
+                if not answer.ok:
+                    # Counted as cached when it was set aside, before there was
+                    # an answer to look at. A copy of nothing is not goodput.
+                    with self._books:
+                        self.usage.cached -= 1
+                        self.usage.skipped += 1
 
-            def finished(which: int, data: dict) -> None:
-                # On the loop thread, the moment the request lands: progress goes
-                # out while the rest are still in flight, the checkpoint is
-                # written before anything can kill the run, and the payload is
-                # read once rather than again at the end.
-                nonlocal done
-                group = groups[which]
-                here = self._read_all(data, [texts[index] for index in group], spare)
-                self._bank(ledger, group, texts, here, instructions, criteria, options)
-                landed[which] = here
-                done += len(here)
-                if on_progress:
-                    on_progress(done, len(unique))
+        rolling = self.transport == "http2" and not _http2.in_a_loop() and bool(groups)
+        pipe = self._pipe_for() if rolling else None
+        run = pipe.new_run() if rolling else None
+        pool = None if rolling else (self._pool_for() if groups else None)
 
-            def failed(which: int, error: Exception) -> bool:
-                # The whole request is gone, so every item in it is gone with it.
-                group = groups[which]
-                if not spare(len(group)):
-                    return False
-                landed[which] = [self._gave_up(texts[index], str(error), position, len(group))
-                                 for position, index in enumerate(group, start=1)]
-                nonlocal done
-                done += len(group)
-                if on_progress:
-                    on_progress(done, len(unique))
-                return True
+        def start(which: int):
+            texts_here = [texts[index] for index in groups[which]]
+            if rolling:
+                return pipe.submit(self._body(texts_here, instructions, criteria, options),
+                                   run, on_request=self._count, on_timing=self._note_latency,
+                                   on_retry=self._count_retry)
+            return pool.submit(self._ask_group, texts_here, instructions,
+                               criteria, options, spare)
 
-            try:
-                self._pipe_for().ask_all(
-                    bodies, on_request=self._count, on_timing=self._note_latency,
-                    on_retry=self._count_retry, on_done=finished, on_failed=failed)
-            except JevError:
-                # Whatever did land is already read, in order, and on disk if a
-                # checkpoint was given. Hand it over before raising.
-                self.last_partial = [answer for which in sorted(landed) for answer in landed[which]]
-                if ledger is not None:
-                    ledger.flush()
-                raise
-            for which in sorted(landed):
-                for index, answer in zip(groups[which], landed[which]):
-                    answers[index] = answer
-                    if answer.ok:
-                        self._remember(texts[index], instructions, criteria, options, answer)
-        elif groups:
-            pool = self._pool_for()
+        def finish(which: int, future) -> list[Answer]:
+            if rolling:
+                return self._read_all(future.result(),
+                                      [texts[index] for index in groups[which]], spare)
+            return future.result()
 
-            def one_group(group):
-                # The error is returned rather than raised, so a later group is
-                # still placed against its own items instead of the map stopping.
-                try:
-                    return self._ask_group([texts[i] for i in group], instructions,
-                                           criteria, options, spare)
-                except JevError as error:
-                    if not spare(len(group)):
-                        raise
-                    return [self._gave_up(texts[index], str(error), position, len(group))
-                            for position, index in enumerate(group, start=1)]
+        cursor = 0
+        done = 0
+        started = time.monotonic()
+        queued = deque(range(len(groups)))
+        window = max(1, self.workers * WINDOW_PER_WORKER)
+        flying: dict = {}
 
-            # A bounded rolling window, not `pool.map`. Consuming a map in input
-            # order means a slow first request holds back the banking, the
-            # progress and the error of every request behind it that has already
-            # finished: measured locally, a request that came back in 13ms was
-            # not reported for 352ms, and a fatal second request let all 64 start.
-            queued = deque(range(len(groups)))
-            window = max(1, self.workers * WINDOW_PER_WORKER)
-            flying: dict = {}
-            landed: dict[int, list[Answer]] = {}
+        def fill() -> None:
+            while queued and len(flying) < window:
+                which = queued.popleft()
+                flying[start(which)] = which
 
-            def fill() -> None:
-                while queued and len(flying) < window:
-                    which = queued.popleft()
-                    flying[pool.submit(one_group, groups[which])] = which
-
+        try:
             fill()
-            try:
-                while flying:
-                    ready, _ = wait_for(list(flying), return_when=FIRST_COMPLETED)
-                    for future in ready:
-                        which = flying.pop(future)
-                        result = future.result()          # the group's error surfaces here
-                        group = groups[which]
-                        landed[which] = result
-                        self._bank(ledger, group, texts, result,
-                                   instructions, criteria, options)
-                        for index, answer in zip(group, result):
-                            if answer.ok:
-                                self._remember(texts[index], instructions, criteria,
-                                               options, answer)
-                        done += len(result)
-                        if on_progress:
-                            on_progress(done, len(unique))
-                    fill()
-            except JevError:
-                # Nothing else goes out, and nothing that has not started is
-                # waited on. What landed is kept, in input order.
-                queued.clear()
-                for future in flying:
-                    future.cancel()
-                self.last_partial = [answer for which in sorted(landed)
-                                     for answer in landed[which]]
-                # The fast path flushes before it raises; so must this one, or a
-                # checkpoint means one thing on one transport and another on the
-                # other, which is the whole asymmetry class we keep finding.
-                if ledger is not None:
-                    ledger.flush()
-                raise
-            for which in sorted(landed):
-                for index, answer in zip(groups[which], landed[which]):
-                    answers[index] = answer
-            self.last_partial = [answer for which in sorted(landed) for answer in landed[which]]
-        for index, source in duplicates.items():
-            answers[index] = _copy_answer(answers[source], texts[index])
-            if not answers[index].ok:
-                # Counted as cached when it was set aside, before there was an
-                # answer to look at. A copy of nothing is not goodput.
-                with self._books:
-                    self.usage.cached -= 1
-                    self.usage.skipped += 1
+            while flying:
+                ready, _ = wait_for(list(flying), return_when=FIRST_COMPLETED)
+                for future in ready:
+                    which = flying.pop(future)
+                    group = groups[which]
+                    try:
+                        here = finish(which, future)
+                    except JevError as error:
+                        if not spare(len(group)):
+                            raise
+                        here = [self._gave_up(texts[index], str(error), position, len(group))
+                                for position, index in enumerate(group, start=1)]
+                    self._bank(ledger, group, texts, here, instructions, criteria, options)
+                    for index, answer in zip(group, here):
+                        settle(index, answer)
+                    done += len(here)
+                    if on_progress:
+                        on_progress(done, len(unique))
+                fill()
+                while cursor < len(answers) and answers[cursor] is not None:
+                    yield answers[cursor]
+                    cursor += 1
 
-        missing = [index for index, answer in enumerate(answers) if answer is None]
-        if missing:
-            raise JevError(f"{len(missing)} of {len(texts)} items came back without an answer; "
-                           f"the first is item {missing[0] + 1}")
-        if ledger is not None:
-            ledger.flush()
-        self.usage.items += len(texts)
-        self.usage.seconds += time.monotonic() - started
-        return answers
+            while cursor < len(answers) and answers[cursor] is not None:
+                yield answers[cursor]
+                cursor += 1
+            missing = [index for index, answer in enumerate(answers) if answer is None]
+            if missing:
+                raise JevError(f"{len(missing)} of {len(texts)} items came back without an "
+                               f"answer; the first is item {missing[0] + 1}")
+        except JevError:
+            # Nothing else goes out, nothing unstarted is waited on, and what did
+            # land is kept. The fast path and the threaded one both flush, or a
+            # checkpoint would mean different things on each.
+            queued.clear()
+            if run is not None:
+                # Told, not cancelled. Cancelling a request that is already in
+                # the air leaves its task stuck in "cancelling" and the loop is
+                # then stopped with a pending future behind it, which hangs about
+                # one run in three. Anything that has not sent sees this and
+                # raises; anything that has is given a moment to come back.
+                if not run.broken:
+                    run.broken = "the run was abandoned"
+                if flying:
+                    wait_for(list(flying), timeout=DRAIN_S)
+            else:
+                for future in flying:
+                    future.cancel()          # threads: only the ones not started yet
+            self.last_partial = [answer for answer in answers if answer is not None]
+            if ledger is not None:
+                ledger.flush()
+            raise
+        finally:
+            if ledger is not None:
+                ledger.flush()
+            self.usage.items += len(texts)
+            self.usage.seconds += time.monotonic() - started
 
     # -- the parts ---------------------------------------------------------
     def _body(self, texts: Sequence[str], instructions: str,
               criteria: dict | None, options: dict | None) -> dict:
         return (_one_body(self.model, texts[0], instructions, criteria, options)
                 if len(texts) == 1
-                else _packed_body(self.model, texts, instructions, criteria, options))
+                else _packed_body(self.model, texts, instructions, criteria, options,
+                                  self.guidance))
 
     def _entry(self, data: dict, position: int) -> dict:
         entry = (data.get("answers") or {}).get(f"item_{position}")
@@ -741,7 +730,12 @@ class Client:
         it counts the question block once per item because that is how the API
         is shaped.
         """
-        overhead = len(json.dumps(_question(instructions, criteria, options)))
+        if self.guidance == "once":
+            overhead = len(json.dumps(_question("Judge item_00 only, ignoring every "
+                                                "other item, against the question in guidance.",
+                                                None, options)))
+        else:
+            overhead = len(json.dumps(_question(instructions, criteria, options)))
         groups: list[list[int]] = []
         current: list[int] = []
         state_chars = 0
@@ -794,7 +788,7 @@ class Client:
         # by position within a request, so an answer produced at pack=32 is not
         # the answer you would have got at pack=1, and a cache or a checkpoint
         # that ignores the depth quietly serves one for the other.
-        return (self.model, self.pack, text, instructions,
+        return (self.model, self.pack, self.guidance, text, instructions,
                 json.dumps(criteria, sort_keys=True), json.dumps(options, sort_keys=True))
 
     def _cached(self, text, instructions, criteria, options) -> Answer | None:
@@ -825,24 +819,57 @@ def _question(instructions: str, criteria: dict | None, options: dict | None) ->
     return question
 
 
+GUIDANCE = "guidance"                  # the state key the shared question lives under
+
+
+def _guidance_text(instructions: str, criteria: dict | None, options: dict | None) -> str:
+    """
+    The question as one piece of text, to sit in the state once.
+
+    For a pick-one question the option names stay in each question, because they
+    are the answer space rather than wording. Only the instructions move.
+    """
+    if options:
+        return instructions
+    lines = [instructions]
+    for name, meaning in (criteria or {}).items():
+        lines.append(f"{name}: {meaning}")
+    return "\n".join(lines)
+
+
 def _one_body(model, text, instructions, criteria, options) -> dict:
     return {"model": model, "state": {"item_1": text},
             "questions": {"item_1": _question(instructions, criteria, options)}}
 
 
-def _packed_body(model, texts: Sequence[str], instructions, criteria, options) -> dict:
+def _packed_body(model, texts: Sequence[str], instructions, criteria, options,
+                 guidance: str = "repeat") -> dict:
     """
     Several items in one state, one question each, every question naming the
     item it is about. Nothing about the question changes but that name.
+
+    With `guidance="once"` the question's wording moves into the state under one
+    key and each question points at it. Measured on a live 32-item request with a
+    long yes/no question, that took the billed input from 4,598 tokens to 1,777,
+    because repeating the whole question thirty-two times is most of the body.
+    It is a different prompt, so it is not the default.
     """
     state = {f"item_{position}": text for position, text in enumerate(texts, start=1)}
+    shared = guidance == "once"
+    if shared:
+        state[GUIDANCE] = _guidance_text(instructions, criteria, options)
     questions = {}
     for position in range(1, len(texts) + 1):
         name = f"item_{position}"
-        question = _question(
-            f"{instructions} Judge {name} only, ignoring every other item.",
-            criteria, options)
-        questions[name] = question
+        if shared:
+            questions[name] = _question(
+                f"Judge {name} only, ignoring every other item, "
+                f"against the question in {GUIDANCE}.",
+                None, options)
+        else:
+            questions[name] = _question(
+                f"{instructions} Judge {name} only, ignoring every other item.",
+                criteria, options)
     return {"model": model, "state": state, "questions": questions}
 
 
@@ -897,7 +924,7 @@ def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
     """One call for the common case. Keyword arguments go to `Client`."""
     client_arguments = {name: kwargs.pop(name) for name in
                         ("key", "url", "model", "pack", "workers", "requests_per_minute",
-                         "cache", "dedupe", "transport", "verify")
+                         "cache", "dedupe", "transport", "verify", "guidance")
                         if name in kwargs}
     client = Client(**client_arguments)
     try:
