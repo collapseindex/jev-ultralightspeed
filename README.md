@@ -113,11 +113,23 @@ to 99.6% of the time. Treating them as 30,000 independent draws would report an 
 times narrower than the evidence supports. `bench_eval.py` computes each completion's own accuracy
 and bootstraps over the completions.
 
-**245 retries against the baseline's 1.** The packed arm made 942 requests in 68 seconds, well
-under the request ceiling, and still got pushed back. That points at a limit counted in tokens
-rather than requests, which packing 32 deep runs into hard. Nothing failed: the client backs off
-with jitter, honours `Retry-After`, and frees its slot while it waits. Retries are counted in
-`usage.retries`, so this is a number rather than an absence of complaints.
+**245 retries against the baseline's 1, and what that says about the 26.5x.** The packed arm made
+942 requests in 68 seconds, which is 831 a minute, well under the published 1,200, and still got
+pushed back 245 times. That points at a second limit counted in tokens: at $0.430 of input in 68
+seconds it was pushing about **9M input tokens a minute** against the baseline's 578K.
+
+Which means 26.5x is the gap between *which* ceiling each arm happens to hit, and it is a ceiling
+rather than a floor. Under TypeSafe's published limits it is what you get, and it is measured. On a
+tier with a tighter token budget the arm that is already being throttled is the one that loses, and
+what survives is the part that does not depend on anyone's rate tier: **41% fewer tokens, so about
+1.7x**. Treat 26.5x as the number most likely to move on someone else's account, and 1.7x as the
+one that will not. Nothing failed either way: the client backs off with jitter, honours
+`Retry-After`, and frees its slot while it waits, and `usage.retries` counts it.
+
+**The two arms differ by one sentence as well as by shape.** A packed request ends with "Judge
+item_N only, ignoring every other item"; an unpacked one has nothing to disambiguate and so does
+not carry it. That is a confound, and an honest one to name: the paired interval of −0.83 to +0.61
+points is wide enough to absorb a wording effect of that size, but it is not zero.
 
 **Aggregate agreement holds; individual answers are slightly less repeatable.** Ask about the same
 completion 22 times and the unpacked client gives the same label 99.6% of the time, the packed one
@@ -243,6 +255,31 @@ item text, which is what keeps a million rows inside a laptop: the answer itself
 disk when it is wanted. A hard kill can lose the last couple of hundred answers still in the write
 buffer, and a torn final line is repaired on the next open.
 
+`pack` is part of the key, because an answer produced 32 deep is not the answer you would have got
+one at a time: the position table above measures 3.3 points between the first eight items of a
+request and the last eight. Change `pack` and the items are asked again rather than being served an
+answer from a different depth.
+
+### Finishing around the rows you cannot do
+
+A durable job and a bad row are a bad combination. One item whose answer will not parse ends the
+run; the checkpoint means the rerun resumes, reaches the same row and ends in the same place, and it
+does that forever without telling you which row. `on_error="skip"` is the way out:
+
+```python
+answers = client.classify(rows, question, checkpoint="run.jsonl", on_error="skip")
+bad = [answer for answer in answers if not answer.ok]
+```
+
+An item with no readable answer, and a request that failed for good, leave an `Answer` in place with
+`ok` False and `error` saying why. They are listed in `client.failures` and counted in
+`usage.skipped`, and they are deliberately **not** written to the checkpoint, so the next run tries
+them again rather than banking "no answer" forever.
+
+It is a budget, not a blanket: up to one percent of the items in a call may go this way, or five
+requests' worth, whichever is larger. Past that the run is abandoned and raises, because a wrong key
+must not be quietly skipped a million times. A test holds that line.
+
 ## What it does not do
 
 - **It does not change your question.** The only difference between a packed question and a single
@@ -258,9 +295,9 @@ buffer, and a torn final line is repaired on the next open.
   a key.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529, with jitter and the
   server's own `Retry-After` when it sends one; anything else is raised with what the API said. A
-  run that fails five times is abandoned rather than sending the rest: a wrong key over 200 items
-  sends 12 requests on the fast path and 9 on the threaded one, counted by a test against a local
-  server that refuses everything, rather than estimated. Work already finished is kept: `stream()`
+  failure that is not going to be skipped abandons the run rather than sending the rest: a wrong
+  key over 200 items sends 8 requests on the fast path and 9 on the threaded one, counted by a test
+  against a local server that refuses everything, rather than estimated. Work already finished is kept: `stream()`
   yields each chunk as it completes, after a failed call `client.last_partial` holds the answers
   that did arrive on either transport, and with a `checkpoint` they are already on disk.
 - **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
@@ -269,7 +306,7 @@ buffer, and a torn final line is repaired on the next open.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 54 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 63 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents

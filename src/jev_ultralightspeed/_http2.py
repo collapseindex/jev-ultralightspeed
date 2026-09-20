@@ -42,7 +42,6 @@ def available() -> bool:
 
 
 # How many failures before a run is abandoned rather than sending the rest.
-GIVE_UP_AFTER = 5
 
 
 def _backoff(attempt: int, retry_after: str | None) -> float:
@@ -172,7 +171,8 @@ class Pipe:
             await asyncio.sleep(wait)               # the slot is free while this waits
         raise JevError("out of retries")
 
-    async def _all(self, bodies, on_request, on_timing, on_retry, on_done) -> list[dict]:
+    async def _all(self, bodies, on_request, on_timing, on_retry, on_done,
+                   on_failed=None) -> list[dict]:
         """
         Every request runs to its own end rather than being cancelled by a
         sibling, but a run that is plainly doomed is abandoned early: a wrong
@@ -184,6 +184,13 @@ class Pipe:
         a half-finished run recoverable, so the caller reads each payload there
         and this returns them only for the ordinary case. An exception from it
         fails that request, exactly as a bad payload would on the threaded path.
+
+        `on_failed(index, error)` says what to do with a request that failed for
+        good. Returning True carries on without it, which is how a job of a
+        million rows finishes despite a handful of bad ones. Returning False, or
+        not being given, abandons the whole run there and then: nothing still
+        queued is sent, because the call is going to raise regardless and a wrong
+        key over a million rows would otherwise be refused a million times.
         """
         run = _Run()                    # per call, so two callers cannot stomp each other
 
@@ -195,8 +202,11 @@ class Pipe:
                 return answer
             except Exception as error:
                 run.failures += 1
-                if run.failures >= GIVE_UP_AFTER and not run.broken:
-                    run.broken = f"abandoned after {run.failures} failures, the first being: {error}"
+                if on_failed is not None and on_failed(index, error):
+                    return None             # carried, and the caller has marked those items
+                if not run.broken:
+                    run.broken = (f"abandoned after {run.failures} failures, "
+                                  f"the first being: {error}")
                 raise
 
         answers = await asyncio.gather(*(one(index, body) for index, body in enumerate(bodies)),
@@ -209,9 +219,10 @@ class Pipe:
     # -- from ordinary code ------------------------------------------------
     def ask_all(self, bodies: Sequence[dict], *, on_request: Callable | None = None,
                 on_timing: Callable | None = None, on_retry: Callable | None = None,
-                on_done: Callable | None = None) -> list[dict]:
+                on_done: Callable | None = None,
+                on_failed: Callable | None = None) -> list[dict]:
         future = asyncio.run_coroutine_threadsafe(
-            self._all(bodies, on_request, on_timing, on_retry, on_done), self._loop)
+            self._all(bodies, on_request, on_timing, on_retry, on_done, on_failed), self._loop)
         return future.result()
 
     def warm(self) -> None:

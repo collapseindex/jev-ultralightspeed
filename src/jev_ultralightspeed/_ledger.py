@@ -20,7 +20,7 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-FORMAT = 1
+FORMAT = 2                        # 2 put the pack depth in the key; 1 did not
 DIGEST_BYTES = 16                 # 128 bits of a sha256, which is plenty for a run of a million
 FLUSH_EVERY = 256                 # answers, so a hard kill costs at most this many re-asks
 _FAST_PREFIX = b'{"k":"'          # every record we write starts this way
@@ -81,8 +81,11 @@ class Ledger:
                 raise NotACheckpoint(f"{self.path} is not a jev checkpoint file; "
                                      f"point --checkpoint somewhere else")
             if header.get("jev_checkpoint") != FORMAT:
-                raise NotACheckpoint(f"{self.path} is checkpoint format "
-                                     f"{header.get('jev_checkpoint')}, this is {FORMAT}")
+                raise NotACheckpoint(
+                    f"{self.path} is checkpoint format {header.get('jev_checkpoint')} and this "
+                    f"version writes {FORMAT}. Format 1 keyed answers without the pack depth, so "
+                    f"reusing it could serve an answer from one depth for another. Delete it and "
+                    f"start again, or keep it and point somewhere new.")
             offset = handle.tell()
             for line in handle:
                 found = _key_in(line)

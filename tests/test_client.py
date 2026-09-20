@@ -287,7 +287,8 @@ def test_the_fast_path_waits_outside_the_slot_it_holds():
     assert source.index("if run.broken", inside) > inside
     everything = inspect.getsource(_http2.Pipe._all)
     assert "return_exceptions=True" in everything, "a sibling must not cancel the rest"
-    assert "GIVE_UP_AFTER" in everything, "a doomed run must be abandoned, not sent in full"
+    # That a doomed run is abandoned rather than sent in full is measured against
+    # a counting server below, not asserted against the source.
 
 
 def test_one_limiter_serves_both_transports():
@@ -430,7 +431,7 @@ class Answering:
     way to test it the way a caller sees it.
     """
 
-    def __init__(self, delay=0.0, fail_after=None, drop_last=False):
+    def __init__(self, delay=0.0, fail_after=None, drop_last=False, poison=None):
         # Threading, and it has to be: keep-alive on a single-threaded server
         # serializes the workers, so the concurrency under test disappears and
         # the run deadlocks instead of failing.
@@ -458,7 +459,12 @@ class Answering:
                 names = [name for name in asked["state"] if name.startswith("item_")]
                 if drop_last:
                     names = names[:-1]                  # a payload one answer short
-                answers = {name: {"type": "noul", "noul": 0.8} for name in names}
+                answers = {}
+                for name in names:
+                    if poison is not None and poison in str(asked["state"][name]):
+                        answers[name] = {"type": "noul", "shrug": "cannot say"}   # unreadable
+                    else:
+                        answers[name] = {"type": "noul", "noul": 0.8}
                 self.answer(200, {"model": "jev-1.13.0", "answers": answers,
                                   "usage": {"input_tokens": 10, "output_tokens": 1}})
 
@@ -743,3 +749,137 @@ def test_the_digest_reads_a_record_without_parsing_it():
     assert _ledger._key_in(b'{"p":0.9,"k":"' + b"cd" * 16 + b'"}\n') == bytes.fromhex("cd" * 16)
     assert _ledger._key_in(b'{"k":"deadbe') is None
     assert _ledger._key_in(b"\n") is None
+
+
+# -- skipping the rows that cannot be done ----------------------------------
+
+@both_transports
+def test_one_bad_row_cannot_wedge_a_checkpointed_job(transport, tmp_path):
+    """
+    The two features fight each other without this. One unreadable answer ends
+    the run; the checkpoint means the rerun resumes, reaches the same row, and
+    ends in the same place. Forever, and without saying which row.
+    """
+    book = tmp_path / "run.jsonl"
+    server = Answering(poison="row 37")
+    items = [f"row {n}" for n in range(100)]
+
+    client = a_real_client(server.url, transport, pack=8, workers=4)
+    try:
+        with pytest.raises(JevError):                    # the old behaviour, still the default
+            client.classify(items, QUESTION, checkpoint=book)
+    finally:
+        client.close()
+
+    first = a_real_client(server.url, transport, pack=8, workers=4)
+    try:
+        answers = first.classify(items, QUESTION, checkpoint=book, on_error="skip")
+    finally:
+        first.close()
+
+    assert len(answers) == 100
+    assert [a.item for a in answers] == items
+    bad = [a for a in answers if not a.ok]
+    assert [a.item for a in bad] == ["row 37"], "the wrong rows were given up on"
+    assert bad[0].error and "unreadable" in bad[0].error
+    assert first.usage.skipped == 1
+    assert [a.item for a in first.failures] == ["row 37"]
+    assert len(records_in(book)) == 99, "the row with no answer was banked as if it had one"
+
+    before = server.seen
+    second = a_real_client(server.url, transport, pack=8, workers=4)
+    try:
+        again = second.classify(items, QUESTION, checkpoint=book, on_error="skip")
+    finally:
+        second.close()
+    server.close()
+
+    assert len(again) == 100
+    assert second.usage.resumed == 99
+    assert server.seen - before == 1, "the second run re-asked more than the row that failed"
+
+
+@both_transports
+def test_skipping_does_not_swallow_a_wrong_key(transport):
+    """
+    The budget is what stops `skip` turning a broken run into a million empty
+    answers. Five requests' worth of items, then it gives up and says so.
+    """
+    server = Counting()
+    client = a_real_client(server.url, transport, pack=8, workers=4)
+    try:
+        with pytest.raises(JevError):
+            client.classify([f"row {n}" for n in range(1000)], QUESTION, on_error="skip")
+    finally:
+        client.close()
+        server.close()
+    assert client.usage.skipped <= 40 + 8, f"{client.usage.skipped} items skipped before giving up"
+    assert server.seen < 100, f"{server.seen} requests sent for a run that was never going to work"
+
+
+@both_transports
+def test_a_request_that_fails_for_good_marks_every_item_in_it(transport):
+    """A whole request is gone, so the items are gone together, in place."""
+    server = Answering(fail_after=2)
+    client = a_real_client(server.url, transport, pack=4, workers=1)
+    items = [f"row {n}" for n in range(16)]
+    try:
+        answers = client.classify(items, QUESTION, on_error="skip")
+    finally:
+        client.close()
+        server.close()
+
+    assert [a.item for a in answers] == items
+    assert sum(1 for a in answers if not a.ok) == 8, "two failed requests, four items each"
+    assert client.usage.skipped == 8
+    assert all(a.label == "" and a.p == 0.0 for a in answers if not a.ok)
+
+
+def test_on_error_takes_one_of_two_words():
+    client = Fake()
+    with pytest.raises(JevError, match="on_error"):
+        client.classify(["one"], QUESTION, on_error="ignore")
+
+
+def test_a_checkpoint_is_per_pack_depth(tmp_path):
+    """
+    bench_packing.py measures a 3.3 point spread by position in a request, so an
+    answer from pack=32 is not the answer pack=1 would have given. Serving one
+    for the other is the quiet kind of wrong.
+    """
+    book = tmp_path / "run.jsonl"
+    server = Answering()
+    texts = [f"row {n}" for n in range(8)]
+    for pack in (8, 1):
+        client = a_real_client(server.url, "threads", pack=pack, workers=1)
+        try:
+            client.classify(texts, QUESTION, checkpoint=book)
+        finally:
+            client.close()
+    asked = server.seen
+    server.close()
+    assert asked == 1 + 8, "a checkpoint from pack=8 was served to a pack=1 run"
+
+
+def test_usage_does_not_call_resumed_items_speed(tmp_path):
+    """
+    `usage` is the evidence behind every claim in the README, so the one number
+    in it that was not true was worth fixing: a resumed run reported millions of
+    items a second.
+    """
+    book = tmp_path / "run.jsonl"
+    server = Answering()
+    items = [f"row {n}" for n in range(20)]
+    for _ in range(2):
+        client = a_real_client(server.url, "threads", pack=4, workers=2)
+        try:
+            client.classify(items, QUESTION, checkpoint=book)
+        finally:
+            client.close()
+    server.close()
+
+    assert client.usage.resumed == 20
+    assert client.usage.answered == 0
+    assert client.usage.items_per_second == 0.0
+    assert client.usage.tokens_per_item == 0.0
+    assert "20 resumed" in str(client.usage)

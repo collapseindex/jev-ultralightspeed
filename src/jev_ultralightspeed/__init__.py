@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -57,6 +57,9 @@ TIMEOUT_S = 60.0
 MAX_ITEM_CHARS = 20_000
 WARM_TIMEOUT_S = 5.0                   # warming is an optimisation, never a wait worth minutes
 MAX_LATENCIES = 10_000                 # kept for percentiles, not forever
+SKIP_FRACTION = 0.01                   # of the items in a call, before skipping gives up
+MIN_SKIP_BUDGET = 5                    # requests' worth, so a small call is not held to 1%
+MAX_FAILURES_KEPT = 1_000              # reported in full; the rest are counted only
 
 
 class JevError(RuntimeError):
@@ -75,10 +78,16 @@ class Answer:
     confidence: float | None = None
     position: int = 1             # where this item sat in its request, 1 for an unpacked one
     packed: int = 1               # how many items shared that request
+    error: str | None = None      # why there is no answer here, with on_error="skip"
 
     @property
     def yes(self) -> bool:
         return self.label == "yes"
+
+    @property
+    def ok(self) -> bool:
+        """False for a skipped item. Check this before trusting `label`."""
+        return self.error is None
 
 
 @dataclass
@@ -92,17 +101,27 @@ class Usage:
     output_tokens: int = 0
     cached: int = 0
     resumed: int = 0             # answered by a checkpoint from an earlier run
+    skipped: int = 0             # items with no readable answer, under on_error="skip"
     seconds: float = 0.0
 
     USD_PER_MILLION_INPUT = 0.042        # TypeSafe's published price
 
     @property
+    def answered(self) -> int:
+        """Items that actually cost a request. The rest came from memory or disk."""
+        return max(0, self.items - self.cached - self.resumed)
+
+    @property
     def items_per_second(self) -> float:
-        return self.items / self.seconds if self.seconds else 0.0
+        # Over the items that were asked, not the ones handed back for free: a
+        # resumed run otherwise reports millions of items a second, which is the
+        # one number in here that would not be true.
+        return self.answered / self.seconds if self.seconds and self.answered else 0.0
 
     @property
     def tokens_per_item(self) -> float:
-        return (self.input_tokens + self.output_tokens) / self.items if self.items else 0.0
+        return ((self.input_tokens + self.output_tokens) / self.answered
+                if self.answered else 0.0)
 
     @property
     def usd(self) -> float:
@@ -111,7 +130,9 @@ class Usage:
     def __str__(self) -> str:
         retried = f", {self.retries} retried" if self.retries else ""
         retried += f", {self.resumed} resumed" if self.resumed else ""
-        return (f"{self.items} items in {self.seconds:.2f}s "
+        retried += f", {self.skipped} skipped" if self.skipped else ""
+        asked = "" if self.answered == self.items else f" of {self.items}"
+        return (f"{self.answered}{asked} items in {self.seconds:.2f}s "
                 f"({self.items_per_second:.1f}/s, {self.requests} requests{retried}, "
                 f"{self.tokens_per_item:.0f} tokens/item, ${self.usd:.5f})")
 
@@ -179,7 +200,8 @@ class Client:
         self._pool: ThreadPoolExecutor | None = None
         self._ledgers: dict[str, Ledger] = {}
         self._books = threading.Lock()
-        self.last_partial: list = []       # payloads that arrived before a failed run gave up
+        self.last_partial: list = []       # answers that arrived before a failed run gave up
+        self.failures: list[Answer] = []   # items skipped under on_error="skip"
         self.latencies: list[float] = []
         self._limiter = _Limiter(requests_per_minute)
         self.usage = Usage()
@@ -321,6 +343,7 @@ class Client:
         options: dict | None = None,
         chunk: int = 5_000,
         checkpoint: str | os.PathLike | None = None,
+        on_error: str = "raise",
     ):
         """
         The same work, a chunk at a time, so a million rows cost the memory
@@ -344,11 +367,13 @@ class Client:
             batch.append(item)
             if len(batch) >= chunk:
                 yield from self.classify(batch, instructions, criteria=criteria,
-                                         options=options, checkpoint=checkpoint)
+                                         options=options, checkpoint=checkpoint,
+                                         on_error=on_error)
                 batch = []
         if batch:
             yield from self.classify(batch, instructions, criteria=criteria,
-                                     options=options, checkpoint=checkpoint)
+                                     options=options, checkpoint=checkpoint,
+                                     on_error=on_error)
 
     def classify(
         self,
@@ -359,6 +384,7 @@ class Client:
         options: dict | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         checkpoint: str | os.PathLike | None = None,
+        on_error: str = "raise",
     ) -> list[Answer]:
         """
         Answer one question about every item, in order.
@@ -374,7 +400,19 @@ class Client:
         already in it is not asked again, and every new answer is appended as
         its request lands, so the same call run twice costs nothing the second
         time and a killed run resumes where it stopped.
+
+        `on_error="skip"` finishes the job around the rows it cannot do. An item
+        whose answer will not read, and a request that fails for good, leave an
+        `Answer` with `ok` False and `error` set, in place, and the run carries
+        on. They are listed in `client.failures` and counted in `usage.skipped`,
+        and they are **not** written to the checkpoint, so a rerun tries them
+        again. Up to one percent of the items in the call may go this way, or
+        five requests' worth, whichever is larger; past that the run is
+        abandoned and raises, because a wrong key must not be skipped a million
+        times over.
         """
+        if on_error not in ("raise", "skip"):
+            raise JevError('on_error must be "raise" or "skip"')
         texts = [_clean(item, index) for index, item in enumerate(items)]
         if not texts:
             return []
@@ -416,6 +454,20 @@ class Client:
         groups = [unique[at:at + self.pack] for at in range(0, len(unique), self.pack)]
         done = 0
         started = time.monotonic()
+
+        # One budget in items, whether they were lost an item or a request at a
+        # time, so "skip" cannot turn a broken run into a million empty answers.
+        budget = (max(MIN_SKIP_BUDGET * self.pack, int(len(unique) * SKIP_FRACTION))
+                  if on_error == "skip" else 0)
+        given_up = [0]
+
+        def spare(count: int) -> bool:
+            """True when the run can afford to lose this many items and carry on."""
+            if on_error != "skip":
+                return False
+            with self._books:
+                given_up[0] += count
+                return given_up[0] <= budget
         # Inside somebody else's event loop the threaded path is used instead.
         if groups and self.transport == "http2" and not _http2.in_a_loop():
             # One connection, every request in flight on it.
@@ -431,21 +483,30 @@ class Client:
                 # read once rather than again at the end.
                 nonlocal done
                 group = groups[which]
-                here = [_read(self._entry(data, position), texts[index], position, len(group))
-                        for position, index in enumerate(group, start=1)]
-                if ledger is not None:
-                    for index, answer in zip(group, here):
-                        ledger.record(self._key(texts[index], instructions, criteria, options),
-                                      answer)
+                here = self._read_all(data, [texts[index] for index in group], spare)
+                self._bank(ledger, group, texts, here, instructions, criteria, options)
                 landed[which] = here
                 done += len(here)
                 if on_progress:
                     on_progress(done, len(unique))
 
+            def failed(which: int, error: Exception) -> bool:
+                # The whole request is gone, so every item in it is gone with it.
+                group = groups[which]
+                if not spare(len(group)):
+                    return False
+                landed[which] = [self._gave_up(texts[index], str(error), position, len(group))
+                                 for position, index in enumerate(group, start=1)]
+                nonlocal done
+                done += len(group)
+                if on_progress:
+                    on_progress(done, len(unique))
+                return True
+
             try:
                 self._pipe_for().ask_all(
                     bodies, on_request=self._count, on_timing=self._note_latency,
-                    on_retry=self._count_retry, on_done=finished)
+                    on_retry=self._count_retry, on_done=finished, on_failed=failed)
             except JevError:
                 # Whatever did land is already read, in order, and on disk if a
                 # checkpoint was given. Hand it over before raising.
@@ -456,23 +517,42 @@ class Client:
             for which in sorted(landed):
                 for index, answer in zip(groups[which], landed[which]):
                     answers[index] = answer
-                    self._remember(texts[index], instructions, criteria, options, answer)
+                    if answer.ok:
+                        self._remember(texts[index], instructions, criteria, options, answer)
         elif groups:
             pool = self._pool_for()
-            for group, result in zip(groups, pool.map(
-                lambda g: self._ask_group([texts[i] for i in g], instructions, criteria, options),
-                groups,
-            )):
-                for index, answer in zip(group, result):
-                    answers[index] = answer
-                    self.last_partial.append(answer)      # kept if a later group fails
-                    if ledger is not None:
-                        ledger.record(self._key(texts[index], instructions, criteria, options),
-                                      answer)
-                    self._remember(texts[index], instructions, criteria, options, answer)
-                done += len(group)
-                if on_progress:
-                    on_progress(done, len(unique))
+
+            def one_group(group):
+                # The error is returned rather than raised, so a later group is
+                # still placed against its own items instead of the map stopping.
+                try:
+                    return self._ask_group([texts[i] for i in group], instructions,
+                                           criteria, options, spare)
+                except JevError as error:
+                    if not spare(len(group)):
+                        raise
+                    return [self._gave_up(texts[index], str(error), position, len(group))
+                            for position, index in enumerate(group, start=1)]
+
+            try:
+                for group, result in zip(groups, pool.map(one_group, groups)):
+                    for index, answer in zip(group, result):
+                        answers[index] = answer
+                        self.last_partial.append(answer)      # kept if a later group fails
+                        self._bank(ledger, [index], texts, [answer],
+                                   instructions, criteria, options)
+                        if answer.ok:
+                            self._remember(texts[index], instructions, criteria, options, answer)
+                    done += len(group)
+                    if on_progress:
+                        on_progress(done, len(unique))
+            except JevError:
+                # The fast path flushes before it raises; so must this one, or a
+                # checkpoint means one thing on one transport and another on the
+                # other, which is the whole asymmetry class we keep finding.
+                if ledger is not None:
+                    ledger.flush()
+                raise
         for index, source in duplicates.items():
             answers[index] = _copy_answer(answers[source], texts[index])
 
@@ -500,11 +580,40 @@ class Client:
         return entry
 
     def _ask_group(self, texts: Sequence[str], instructions: str,
-                   criteria: dict | None, options: dict | None) -> list[Answer]:
+                   criteria: dict | None, options: dict | None, spare=None) -> list[Answer]:
         data = self.ask(self._body(texts, instructions, criteria, options))
         self._count(data)
-        return [_read(self._entry(data, position), text, position, len(texts))
-                for position, text in enumerate(texts, start=1)]
+        return self._read_all(data, texts, spare)
+
+    def _read_all(self, data: dict, texts: Sequence[str], spare=None) -> list[Answer]:
+        """
+        One payload's answers, in order, read one item at a time.
+
+        Without `spare` an unreadable item raises, which is right for a call you
+        are watching. With it, that item alone is given up on: one row whose
+        answer cannot be read must not be able to end a job of a million,
+        because with a checkpoint the rerun reaches the same row and dies in the
+        same place, forever.
+        """
+        here: list[Answer] = []
+        for position, text in enumerate(texts, start=1):
+            try:
+                here.append(_read(self._entry(data, position), text, position, len(texts)))
+            except JevError as error:
+                if spare is None or not spare(1):
+                    raise
+                here.append(self._gave_up(text, str(error), position, len(texts)))
+        return here
+
+    def _gave_up(self, text: str, why: str, position: int = 1, packed: int = 1) -> Answer:
+        """An item with no answer, kept in place so the order still means something."""
+        answer = Answer(item=text, p=0.0, label="", kind="error",
+                        position=position, packed=packed, error=why)
+        with self._books:
+            self.usage.skipped += 1
+            if len(self.failures) < MAX_FAILURES_KEPT:
+                self.failures.append(answer)
+        return answer
 
     def _count(self, data: dict) -> None:
         usage = data.get("usage") or {}
@@ -519,6 +628,18 @@ class Client:
             self.latencies.append(milliseconds)
             if len(self.latencies) > MAX_LATENCIES:
                 del self.latencies[:len(self.latencies) - MAX_LATENCIES]
+
+    def _bank(self, ledger, group, texts, answers, instructions, criteria, options) -> None:
+        """
+        Put these answers in the checkpoint. A skipped item is left out on
+        purpose: banking "no answer" would make the next run skip it too, and
+        the row would never be done.
+        """
+        if ledger is None:
+            return
+        for index, answer in zip(group, answers):
+            if answer.ok:
+                ledger.record(self._key(texts[index], instructions, criteria, options), answer)
 
     def _ledger_for(self, checkpoint) -> Ledger | None:
         """
@@ -537,8 +658,12 @@ class Client:
             self.usage.retries += 1
 
     def _key(self, text: str, instructions: str, criteria, options) -> tuple:
-        return (self.model, text, instructions, json.dumps(criteria, sort_keys=True),
-                json.dumps(options, sort_keys=True))
+        # `pack` belongs in here. bench_packing.py measures a 3.3 point spread
+        # by position within a request, so an answer produced at pack=32 is not
+        # the answer you would have got at pack=1, and a cache or a checkpoint
+        # that ignores the depth quietly serves one for the other.
+        return (self.model, self.pack, text, instructions,
+                json.dumps(criteria, sort_keys=True), json.dumps(options, sort_keys=True))
 
     def _cached(self, text, instructions, criteria, options) -> Answer | None:
         # Asking again is the whole point of dedupe=False, and a cache read is

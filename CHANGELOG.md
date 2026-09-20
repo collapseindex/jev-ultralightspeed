@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.5.0 (2026-09-20)
+
+v0.4.0 made a job durable and gave it no way to get past a row it could not do, and those two
+features fought each other: the more durable the job, the more permanently one bad row could wedge
+it. Reproduced over 1,000 items with one unparseable answer, resuming from a checkpoint each time:
+
+```
+run 1: died -> unreadable answer  | banked 992
+run 2: died -> unreadable answer  | resumed 992, banked 992
+run 3: died -> unreadable answer  | resumed 992, banked 992
+```
+
+Permanently stuck at 992 of 1,000, and nothing said which row. That is fixed, along with three other
+things a review found.
+
+### Added
+- **`on_error="skip"` on `classify()` and `stream()`.** An item whose answer will not read, and a
+  request that failed for good, leave an `Answer` in place with `ok` False and `error` saying why,
+  and the run carries on. They are listed in `client.failures`, counted in `usage.skipped`, and
+  deliberately **not** written to the checkpoint, so the next run tries them again rather than
+  banking "no answer" forever. The same 1,000 items now finish on both transports: 999 banked, one
+  named, and the rerun re-asks exactly that one.
+- It is a budget, not a blanket: one percent of the items in a call, or five requests' worth,
+  whichever is larger. Past that the run is abandoned and raises, because a wrong key must not be
+  skipped a million times over. Measured: a wrong key under `on_error="skip"` over 1,000 items gives
+  up after 40 items on both transports.
+- `Answer.ok` and `Answer.error`, and `Usage.answered` and `Usage.skipped`.
+
+### Fixed
+- **The checkpoint key ignored the pack depth.** A `pack=1` rerun was served answers produced at
+  `pack=32`, which `bench_packing.py` measures as 3.3 points apart by position. `pack` is in the key
+  now, so changing it asks again. Checkpoint format 2; a format 1 file is refused with a message
+  saying why rather than silently reused.
+- **`usage` lied on a resumed run.** Resumed and cached items counted toward `items_per_second`,
+  which reported *14.5 million items a second* for a run that asked nothing. Rates are over
+  `usage.answered` now, which is the items that actually cost a request. This is the repo where
+  `usage` is the evidence behind every claim, so it was the one number in it that was not true.
+- **The threaded path did not flush its checkpoint before raising** where the fast path did, which
+  is exactly the asymmetry the `both_transports` decorator exists to catch.
+- **`GIVE_UP_AFTER = 5` was an absolute count**, so five post-retry failures abandoned a run whether
+  it was 200 requests or 31,400: a 0.016% failure tolerance on a million rows. The threshold is gone.
+  A failure the caller will not skip now abandons the run immediately, which is strictly better,
+  because in that mode the call is going to raise anyway and the rest of the requests are waste. A
+  wrong key over 200 items now sends 8 requests on the fast path, down from 12, and 9 on the
+  threaded one.
+
+### Changed
+- The README says what the 26.5x is. The packed arm sat at 831 requests a minute, under the
+  published 1,200, and still took 245 retries while pushing about 9M input tokens a minute against
+  the baseline's 578K. So the headline is the gap between *which* ceiling each arm hits, and it is a
+  ceiling rather than a floor. What does not depend on anyone's rate tier is the 41% token saving,
+  about **1.7x**. Both numbers are now in the README with that said plainly.
+- The README also names a confound it had not: a packed request ends with "Judge item_N only,
+  ignoring every other item" and an unpacked one has no reason to, so the two benchmark arms differ
+  by one sentence as well as by shape. The paired interval is wide enough to absorb it. It is still
+  not zero.
+
+63 tests, no key and no network needed.
+
 ## v0.4.0 (2026-09-20)
 
 The README has said "for when the question already works and there are a million rows waiting" since
