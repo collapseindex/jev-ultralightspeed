@@ -25,7 +25,7 @@
   <g transform="translate(64, 92)">
     <text x="0" y="0" fill="#7cb6ff" font-size="112" font-weight="800" letter-spacing="-3">18x FASTER</text>
     <text x="0" y="96" fill="#f2f2f4" font-size="112" font-weight="800" letter-spacing="-3">41% CHEAPER</text>
-    <text x="0" y="140" fill="#a3a3ac" font-size="19">Same question, same items, same answers. Only the shape of the requests changes.</text>
+    <text x="0" y="140" fill="#a3a3ac" font-size="19">Same question, same items, same answers. Against a baseline that is already parallel.</text>
   </g>
 
   <line x1="64" y1="286" x2="1136" y2="286" stroke="#38383d" stroke-width="1"/>
@@ -34,18 +34,18 @@
   <g transform="translate(64, 326)">
     <text x="0" y="0" fill="#a3a3ac" font-size="12" font-weight="700" letter-spacing="1.6">MEASURED ON 1,347 HUMAN-LABELLED ITEMS (XSTEST, VIA DINOSTOMP)</text>
     <g transform="translate(0, 34)">
-      <text x="0" y="14" fill="#a3a3ac" font-size="14">one at a time</text>
+      <text x="0" y="14" fill="#a3a3ac" font-size="14">one per request</text>
       <rect x="150" y="0" width="45" height="26" rx="4" fill="#2a2a2e"/>
       <text x="207" y="19" fill="#f2f2f4" font-size="16">41 items/s</text>
       <text x="380" y="19" fill="#a3a3ac" font-size="16">$0.032</text>
-      <text x="500" y="19" fill="#a3a3ac" font-size="16">89.5% agreement with the humans</text>
+      <text x="500" y="19" fill="#a3a3ac" font-size="16">89.2% agreement with the humans</text>
     </g>
     <g transform="translate(0, 76)">
       <text x="0" y="14" fill="#7cb6ff" font-size="14" font-weight="700">packed</text>
       <rect x="150" y="0" width="810" height="26" rx="4" fill="url(#fast)"/>
       <text x="164" y="19" fill="#0b2545" font-size="16" font-weight="700">739 items/s</text>
       <text x="380" y="19" fill="#0b2545" font-size="16" font-weight="700">$0.019</text>
-      <text x="500" y="19" fill="#0b2545" font-size="16" font-weight="700">90.7% agreement with the humans</text>
+      <text x="500" y="19" fill="#0b2545" font-size="16" font-weight="700">90.6% agreement with the humans</text>
     </g>
   </g>
 

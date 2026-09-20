@@ -11,8 +11,8 @@ First release.
 - `Client.stream()`, which yields answers as they land and never holds more than a chunk, so a
   million rows costs the memory of five thousand.
 - Measured on dinostomp's xstest-refusal pod, 1,347 human-labelled completions: 18x the throughput
-  of one item at a time, 41% less money, agreement with the human labels unchanged (89.5% against
-  90.7%, overlapping intervals). Packing moves about 4% of individual verdicts, where two runs of
+  of one item at a time, 41% less money, agreement with the human labels unchanged (89.2% against
+  90.6%, overlapping intervals). Packing moves about 4% of individual verdicts, where two runs of
   the same shape move 0.3%.
 - An optional HTTP/2 transport (`pip install "jev-ultralightspeed[fast]"`): one event loop, one
   connection, every request in flight multiplexed over it, kept open between calls. About twice the
