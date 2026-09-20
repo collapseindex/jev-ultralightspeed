@@ -39,7 +39,7 @@ from typing import Callable, Iterable, NamedTuple, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.14.1"
+__version__ = "0.15.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -103,6 +103,10 @@ class Answer:
     position: int = 1             # where this item sat in its request, 1 for an unpacked one
     packed: int = 1               # how many items shared that request
     error: str | None = None      # why there is no answer here, with on_error="skip"
+    # Where it landed along the levels of a `score` question, and it can land
+    # between two of them: 1.05 on ["Calm", "Frustrated", "Very angry"] is
+    # frustrated with a little anger behind it. None for the other two types.
+    score: float | None = None
 
     @property
     def yes(self) -> bool:
@@ -127,7 +131,7 @@ class Answer:
             return 0.0
         if self.kind == "noul":
             return max(self.p, 1.0 - self.p)
-        return self.p
+        return self.p                 # choice and score: the level it settled on
 
 
 @dataclass
@@ -138,12 +142,16 @@ class Ask:
     For `judge()`, when the question is not the same for every row. Anything left
     out falls back to what the call was given, so `Ask("some text")` is an
     ordinary item and `Ask(text, options={...})` is one with its own answer space.
+
+    `levels` makes it a score question: an ordered list, low to high, and the
+    answer lands somewhere along it rather than on one of them.
     """
 
     item: str
     instructions: str | None = None
     criteria: dict | None = None
     options: dict | None = None
+    levels: Sequence[str] | None = None
 
 
 class _Ask(NamedTuple):
@@ -153,6 +161,7 @@ class _Ask(NamedTuple):
     instructions: str
     criteria: dict | None
     options: dict | None
+    levels: Sequence[str] | None = None
 
 
 @dataclass
@@ -495,6 +504,7 @@ class Client:
         *,
         criteria: dict | None = None,
         options: dict | None = None,
+        levels: Sequence[str] | None = None,
         chunk: int = 5_000,
         checkpoint: str | os.PathLike | None = None,
         on_error: str = "raise",
@@ -524,11 +534,12 @@ class Client:
             batch.append(item)
             if len(batch) >= chunk:
                 yield from self._answers_for(self._asks(batch, instructions, criteria,
-                                                       options),
+                                                       options, levels),
                                              on_progress, checkpoint, on_error)
                 batch = []
         if batch:
-            yield from self._answers_for(self._asks(batch, instructions, criteria, options),
+            yield from self._answers_for(self._asks(batch, instructions, criteria, options,
+                                                   levels),
                                          on_progress, checkpoint, on_error)
 
     def classify(
@@ -538,6 +549,7 @@ class Client:
         *,
         criteria: dict | None = None,
         options: dict | None = None,
+        levels: Sequence[str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         checkpoint: str | os.PathLike | None = None,
         on_error: str = "raise",
@@ -546,7 +558,9 @@ class Client:
         Answer one question about every item, in order.
 
         `criteria` says what true and false mean for a yes/no question;
-        `options` turns it into a pick-one question over those names.
+        `options` turns it into a pick-one question over those names; `levels`
+        turns it into a score, an ordered list from low to high, and the answer
+        lands somewhere along it rather than on one of them.
 
         `on_progress(done, total)` is called as each request lands, which on the
         fast transport means from a background thread. Keep it cheap, and lock
@@ -567,7 +581,7 @@ class Client:
         abandoned and raises, because a wrong key must not be skipped a million
         times over.
         """
-        return list(self._answers_for(self._asks(items, instructions, criteria, options),
+        return list(self._answers_for(self._asks(items, instructions, criteria, options, levels),
                                       on_progress, checkpoint, on_error))
 
     def judge(
@@ -577,6 +591,7 @@ class Client:
         instructions: str | None = None,
         criteria: dict | None = None,
         options: dict | None = None,
+        levels: Sequence[str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         checkpoint: str | os.PathLike | None = None,
         on_error: str = "raise",
@@ -609,7 +624,7 @@ class Client:
             if not isinstance(ask, Ask):
                 raise JevError(f"judge() takes Ask objects; item {index + 1} is a "
                                f"{type(ask).__name__}. classify() takes plain text.")
-            mark = (id(ask.instructions), id(ask.criteria), id(ask.options))
+            mark = (id(ask.instructions), id(ask.criteria), id(ask.options), id(ask.levels))
             settled = copies.get(mark)
             if settled is None:
                 words = ask.instructions if ask.instructions is not None else instructions
@@ -618,12 +633,17 @@ class Client:
                                    f"given to judge() either")
                 these = ask.criteria if ask.criteria is not None else criteria
                 those = ask.options if ask.options is not None else options
+                steps = ask.levels if ask.levels is not None else levels
+                if those and steps:
+                    raise JevError(f"item {index + 1} has both options and levels; a question "
+                                   f"picks one of a set or scores along a list, not both")
                 settled = copies[mark] = (words, dict(these) if these else these,
-                                          dict(those) if those else those)
+                                          dict(those) if those else those,
+                                          tuple(steps) if steps else steps)
             prepared.append(_Ask(_clean(ask.item, index), *settled))
         return list(self._answers_for(prepared, on_progress, checkpoint, on_error))
 
-    def _asks(self, items, instructions, criteria, options) -> list["_Ask"]:
+    def _asks(self, items, instructions, criteria, options, levels=None) -> list["_Ask"]:
         """
         The same question against every item, which is what `classify` means.
 
@@ -631,9 +651,12 @@ class Client:
         suspended between answers and the caller still holds them, so changing
         one mid-run would otherwise change the questions still to be sent.
         """
+        if options and levels:
+            raise JevError("a question picks one of a set or scores along a list, not both")
         criteria = dict(criteria) if criteria else criteria
         options = dict(options) if options else options
-        return [_Ask(_clean(item, index), instructions, criteria, options)
+        levels = tuple(levels) if levels else levels
+        return [_Ask(_clean(item, index), instructions, criteria, options, levels)
                 for index, item in enumerate(items)]
 
     def _answers_for(self, asks, on_progress, checkpoint, on_error):
@@ -660,11 +683,11 @@ class Client:
         overheads: list[int] = []
         worked_out: dict[tuple, tuple] = {}
         for ask in asks:
-            mark = (id(ask.instructions), id(ask.criteria), id(ask.options))
+            mark = (id(ask.instructions), id(ask.criteria), id(ask.options), id(ask.levels))
             known = worked_out.get(mark)
             if known is None:
                 known = worked_out[mark] = (self._shape(ask.instructions, ask.criteria,
-                                                        ask.options),
+                                                        ask.options, ask.levels),
                                             self._overhead(ask))
             shapes.append(known[0])
             overheads.append(known[1])
@@ -685,7 +708,8 @@ class Client:
                 answers[index] = Answer(item=text, p=stored.p, label=stored.label,
                                         kind=stored.kind, distribution=dict(stored.distribution),
                                         confidence=stored.confidence,
-                                        position=stored.position, packed=stored.packed)
+                                        position=stored.position, packed=stored.packed,
+                                        score=stored.score)
                 self.usage.resumed += 1
             else:
                 todo.append(index)
@@ -898,8 +922,8 @@ class Client:
         if self.guidance == "once":
             return len(json.dumps(_question("Judge item_00 only, ignoring every other item, "
                                             "against the question in guidance.",
-                                            None, ask.options)))
-        return len(json.dumps(_question(ask.instructions, ask.criteria, ask.options)))
+                                            None, ask.options, ask.levels)))
+        return len(json.dumps(_question(ask.instructions, ask.criteria, ask.options, ask.levels)))
 
     def _plan(self, indexes, asks, overheads) -> list[list[int]]:
         """
@@ -971,7 +995,7 @@ class Client:
             self.usage.pushback[status] = self.usage.pushback.get(status, 0) + 1
             self.usage.waited += waited
 
-    def _shape(self, instructions: str, criteria, options) -> tuple:
+    def _shape(self, instructions: str, criteria, options, levels=None) -> tuple:
         """
         Everything an answer depends on except the item itself, serialized once.
 
@@ -987,7 +1011,8 @@ class Client:
         the same reason: a different prompt is a different answer.
         """
         return (self.model, self.pack, self.guidance, instructions,
-                json.dumps(criteria, sort_keys=True), json.dumps(options, sort_keys=True))
+                json.dumps(criteria, sort_keys=True), json.dumps(options, sort_keys=True),
+                json.dumps(list(levels) if levels else None))
 
     def _key(self, text: str, shape: tuple) -> tuple:
         return (text, *shape)
@@ -1010,7 +1035,13 @@ class Client:
 
 # -- request shapes ---------------------------------------------------------
 
-def _question(instructions: str, criteria: dict | None, options: dict | None) -> dict:
+def _question(instructions: str, criteria: dict | None, options: dict | None,
+              levels: Sequence[str] | None = None) -> dict:
+    if levels:
+        # An ordered list, low to high, and the answer is a position along it
+        # rather than one of them.
+        return {"type": "score", "instructions": instructions,
+                "criteria": [str(level) for level in levels]}
     if options:
         return {"type": "choice", "instructions": instructions,
                 "criteria": {str(k): str(v) for k, v in options.items()}}
@@ -1023,14 +1054,16 @@ def _question(instructions: str, criteria: dict | None, options: dict | None) ->
 GUIDANCE = "guidance"                  # the state key the shared question lives under
 
 
-def _guidance_text(instructions: str, criteria: dict | None, options: dict | None) -> str:
+def _guidance_text(instructions: str, criteria: dict | None, options: dict | None,
+                   levels: Sequence[str] | None = None) -> str:
     """
     The question as one piece of text, to sit in the state once.
 
-    For a pick-one question the option names stay in each question, because they
-    are the answer space rather than wording. Only the instructions move.
+    For a pick-one or a score question the options and the levels stay in each
+    question, because they are the answer space rather than wording. Only the
+    instructions move.
     """
-    if options:
+    if options or levels:
         return instructions
     lines = [instructions]
     for name, meaning in (criteria or {}).items():
@@ -1040,7 +1073,8 @@ def _guidance_text(instructions: str, criteria: dict | None, options: dict | Non
 
 def _one_body(model, ask: "_Ask") -> dict:
     return {"model": model, "state": {"item_1": ask.text},
-            "questions": {"item_1": _question(ask.instructions, ask.criteria, ask.options)}}
+            "questions": {"item_1": _question(ask.instructions, ask.criteria, ask.options,
+                                              ask.levels)}}
 
 
 def _same_question(asks: Sequence["_Ask"]) -> bool:
@@ -1054,7 +1088,8 @@ def _same_question(asks: Sequence["_Ask"]) -> bool:
     first = asks[0]
     return all(ask.instructions is first.instructions
                and ask.criteria is first.criteria
-               and ask.options is first.options for ask in asks[1:])
+               and ask.options is first.options
+               and ask.levels is first.levels for ask in asks[1:])
 
 
 def _packed_body(model, asks: Sequence["_Ask"], guidance: str = "repeat") -> dict:
@@ -1076,7 +1111,8 @@ def _packed_body(model, asks: Sequence["_Ask"], guidance: str = "repeat") -> dic
     state = {f"item_{position}": ask.text for position, ask in enumerate(asks, start=1)}
     shared = guidance == "once" and _same_question(asks)
     if shared:
-        state[GUIDANCE] = _guidance_text(asks[0].instructions, asks[0].criteria, asks[0].options)
+        state[GUIDANCE] = _guidance_text(asks[0].instructions, asks[0].criteria,
+                                         asks[0].options, asks[0].levels)
     questions = {}
     for position, ask in enumerate(asks, start=1):
         name = f"item_{position}"
@@ -1084,11 +1120,11 @@ def _packed_body(model, asks: Sequence["_Ask"], guidance: str = "repeat") -> dic
             questions[name] = _question(
                 f"Judge {name} only, ignoring every other item, "
                 f"against the question in {GUIDANCE}.",
-                None, ask.options)
+                None, ask.options, ask.levels)
         else:
             questions[name] = _question(
                 f"{ask.instructions} Judge {name} only, ignoring every other item.",
-                ask.criteria, ask.options)
+                ask.criteria, ask.options, ask.levels)
     return {"model": model, "state": state, "questions": questions}
 
 
@@ -1152,7 +1188,8 @@ def _copy_answer(answer: "Answer", text: str) -> "Answer":
     """
     return Answer(item=text, p=answer.p, label=answer.label, kind=answer.kind,
                   distribution=dict(answer.distribution), confidence=answer.confidence,
-                  position=answer.position, packed=answer.packed, error=answer.error)
+                  position=answer.position, packed=answer.packed, error=answer.error,
+                  score=answer.score)
 
 
 def _read(entry: dict, text: str, position: int = 1, packed: int = 1) -> Answer:
@@ -1160,6 +1197,21 @@ def _read(entry: dict, text: str, position: int = 1, packed: int = 1) -> Answer:
         p = float(entry["noul"])
         return Answer(item=text, p=p, label="yes" if p >= 0.5 else "no", kind="noul",
                       distribution={"yes": p, "no": 1.0 - p},
+                      confidence=_float_or_none(entry.get("confidence")),
+                      position=position, packed=packed)
+    if "score" in entry:
+        # The levels come back numbered, with a legend naming them. The names are
+        # what the caller wrote, so the distribution is handed back under those
+        # rather than under "0", "1", "2".
+        legend = {str(k): str(v) for k, v in (entry.get("legend") or {}).items()}
+        numbered = {str(k): float(v) for k, v in (entry.get("probabilities") or {}).items()}
+        distribution = {legend.get(index, index): value for index, value in numbered.items()}
+        value = float(entry["score"])
+        highest = max(int(index) for index in numbered) if numbered else 0
+        nearest = str(min(max(0, round(value)), highest))
+        return Answer(item=text, p=numbered.get(nearest, 0.0),
+                      label=legend.get(nearest, nearest), kind="score",
+                      distribution=distribution, score=value,
                       confidence=_float_or_none(entry.get("confidence")),
                       position=position, packed=packed)
     if "choice" in entry:

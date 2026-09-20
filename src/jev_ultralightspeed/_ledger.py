@@ -20,7 +20,7 @@ import os
 import threading
 from dataclasses import dataclass, field
 
-FORMAT = 3                        # 2 added the pack depth to the key, 3 the question's shape
+FORMAT = 4                        # 3 added the question's shape, 4 keeps a score answer whole
 DIGEST_BYTES = 16                 # 128 bits of a sha256, which is plenty for a run of a million
 FLUSH_EVERY = 256                 # answers, so a hard kill costs at most this many re-asks
 _FAST_PREFIX = b'{"k":"'          # every record we write starts this way
@@ -37,6 +37,7 @@ class _Record:
     confidence: float | None = None
     position: int = 1
     packed: int = 1
+    score: float | None = None
 
 
 class NotACheckpoint(ValueError):
@@ -119,7 +120,8 @@ class Ledger:
         return _Record(p=float(stored["p"]), label=str(stored["l"]), kind=str(stored["t"]),
                        distribution=dict(stored.get("d") or {}),
                        confidence=stored.get("c"),
-                       position=int(stored.get("i", 1)), packed=int(stored.get("n", 1)))
+                       position=int(stored.get("i", 1)), packed=int(stored.get("n", 1)),
+                       score=stored.get("s"))
 
     # -- writing -----------------------------------------------------------
     def record(self, key: tuple, answer) -> None:
@@ -133,7 +135,8 @@ class Ledger:
         found = digest_of(key)
         line = json.dumps({"k": found.hex(), "p": answer.p, "l": answer.label,
                            "t": answer.kind, "d": answer.distribution,
-                           "c": answer.confidence, "i": answer.position, "n": answer.packed},
+                           "c": answer.confidence, "i": answer.position, "n": answer.packed,
+                           "s": answer.score},
                           separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         with self._lock:
             self._at[found] = self._writer.tell()

@@ -1747,3 +1747,110 @@ def test_the_question_is_serialised_once_per_distinct_question_not_per_row():
     client.judge([Ask(f"row {n}", criteria=shared) for n in range(64)],
                  instructions="the same question")
     assert len(calls) == 1, f"the question was serialised {len(calls)} times for 64 rows"
+
+
+# -- scoring along a list ---------------------------------------------------
+
+LEVELS = ["Calm", "Frustrated", "Very angry"]
+
+
+class Scoring(Client):
+    """A client whose score questions come back the way the API documents them."""
+
+    def __init__(self, where=1.05, **kwargs):
+        kwargs.setdefault("transport", "threads")
+        super().__init__(key="test-key", **kwargs)
+        self.sent = []
+        self.where = where
+
+    def ask(self, body):
+        self.sent.append(body)
+        answers = {}
+        for name in body["state"]:
+            if not name.startswith("item_"):
+                continue
+            answers[name] = {"type": "score", "score": self.where,
+                             "legend": {"0": "Calm", "1": "Frustrated", "2": "Very angry"},
+                             "probabilities": {"0": 0.0, "1": 0.95, "2": 0.05},
+                             "confidence": 0.92}
+        return {"model": "jev-1.13.0", "answers": answers,
+                "usage": {"input_tokens": 10, "output_tokens": 1}}
+
+
+def test_a_score_question_sends_an_ordered_list():
+    client = Scoring(pack=4)
+    client.classify(["a customer wrote in"], "How frustrated are they?", levels=LEVELS)
+    question = client.sent[0]["questions"]["item_1"]
+    assert question["type"] == "score"
+    assert question["criteria"] == LEVELS, "the levels must stay in order and stay a list"
+
+
+def test_a_score_answer_keeps_the_number_and_names_the_level():
+    client = Scoring(pack=4)
+    answer = client.classify(["x"], "How frustrated?", levels=LEVELS)[0]
+    assert answer.kind == "score"
+    assert answer.score == 1.05, "the point of a score is that it lands between levels"
+    assert answer.label == "Frustrated", "the nearest level, by name"
+    assert answer.p == 0.95
+    assert answer.distribution == {"Calm": 0.0, "Frustrated": 0.95, "Very angry": 0.05}
+    assert answer.confidence == 0.92
+    assert answer.certainty == 0.95
+
+
+def test_a_score_at_the_top_of_the_range_is_not_off_the_end():
+    client = Scoring(where=2.4, pack=4)
+    answer = client.classify(["x"], "How frustrated?", levels=LEVELS)[0]
+    assert answer.label == "Very angry", answer.label
+    assert answer.score == 2.4
+
+
+def test_levels_stay_in_every_question_like_options_do():
+    """They are the answer space, not wording, so there is nothing to hoist."""
+    from jev_ultralightspeed import GUIDANCE
+
+    client = Scoring(pack=4, guidance="once")
+    client.classify(["a", "b"], "How frustrated?", levels=LEVELS)
+    body = client.sent[0]
+    assert body["state"][GUIDANCE] == "How frustrated?"
+    for question in body["questions"].values():
+        assert question["criteria"] == LEVELS
+
+
+def test_a_question_is_one_shape_or_the_other():
+    client = Scoring()
+    with pytest.raises(JevError, match="not both"):
+        client.classify(["x"], "q", options={"a": "A"}, levels=LEVELS)
+
+
+def test_the_levels_are_part_of_the_key():
+    """Scoring against a different ladder is a different answer."""
+    one = Scoring(pack=4)
+    assert (one._shape("q", None, None, ["low", "high"])
+            != one._shape("q", None, None, ["low", "middle", "high"]))
+    assert one._shape("q", None, None, None) != one._shape("q", None, None, ["low", "high"])
+
+
+def test_one_request_can_mix_all_three_kinds_of_question():
+    """The API takes them together, and judge() is how you say that."""
+    from jev_ultralightspeed import Ask
+
+    client = Scoring(pack=8)
+    client.judge([Ask("a", instructions="Urgent?"),
+                  Ask("b", instructions="Which team?", options={"billing": "b", "tech": "t"}),
+                  Ask("c", instructions="How frustrated?", levels=LEVELS)])
+    kinds = [q["type"] for q in client.sent[0]["questions"].values()]
+    assert kinds == ["noul", "choice", "score"], kinds
+    assert len(client.sent) == 1, "three kinds of question, one request"
+
+
+def test_a_resumed_score_still_has_its_number(tmp_path):
+    book = tmp_path / "run.jsonl"
+    first = Scoring(pack=4)
+    first.classify(["x", "y"], "How frustrated?", levels=LEVELS, checkpoint=book)
+    first.close()
+    second = Scoring(pack=4)
+    answers = second.classify(["x", "y"], "How frustrated?", levels=LEVELS, checkpoint=book)
+    second.close()
+    assert second.usage.resumed == 2
+    assert [a.score for a in answers] == [1.05, 1.05]
+    assert [a.label for a in answers] == ["Frustrated", "Frustrated"]

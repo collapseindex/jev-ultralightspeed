@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.14.1** · Apache-2.0 · no required dependencies
+**v0.15.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -329,6 +329,44 @@ plus the longest question, and `pack` counts items, so several individually lega
 illegal request. Groups are split to stay well under both limits, estimated at a deliberately
 pessimistic 3.5 characters per token against 3.92 measured on a live packed request. Short items are
 unaffected and still pack to `pack`.
+
+### Scoring along a list
+
+Jev answers three shapes of question and this client now sends all three. `criteria` makes it yes/no,
+`options` makes it pick-one, and **`levels` makes it a score**: an ordered list from low to high,
+where the answer lands somewhere along it rather than on one of them.
+
+```python
+answers = classify(messages, "How angry is the customer?",
+                   levels=["Calm", "Mildly annoyed", "Frustrated", "Angry", "Furious"])
+
+for answer in answers:
+    print(answer.score, answer.label)      # 2.53  Angry
+```
+
+Live, on four support messages:
+
+| `score` | nearest level | message |
+| ---: | --- | --- |
+| 0.00 | Calm | thanks so much for sorting that out yesterday |
+| **2.53** | Angry | this is the third time I've had to chase this |
+| 0.00 | Calm | quick question about my invoice date, no rush |
+| 3.99 | Furious | ABSOLUTELY UNACCEPTABLE. I want a refund |
+
+The 2.53 is the point: it sits between "Frustrated" and "Angry" because the probability is split
+between them, which a pick-one question cannot express. `answer.score` is that number,
+`answer.label` is the nearest level by name, and `answer.distribution` is the spread across all of
+them under your own names rather than under `"0"`, `"1"`, `"2"`.
+
+Levels stay in every question rather than moving into shared guidance, for the same reason option
+names do: they are the answer space, not wording. And since the API takes all three kinds in one
+request, `judge` can mix them:
+
+```python
+judge([Ask(row, instructions="Urgent?"),
+       Ask(row, instructions="Which team?", options=teams),
+       Ask(row, instructions="How angry?", levels=ladder)])     # one request
+```
 
 ### When every row asks something different
 
@@ -718,7 +756,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 124 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 132 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python demo.py                                      # the two arms racing, 30s, no key

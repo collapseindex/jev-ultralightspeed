@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.15.0 (2026-09-20)
+
+### Added
+- **`levels`: the score question type.** Jev answers three shapes and this client sent two of them.
+  The missing one is the continuous one, an ordered list from low to high where the answer lands
+  somewhere along it rather than on one of them, and it is the shape an evaluator usually wants.
+
+      answers = classify(messages, "How angry is the customer?",
+                         levels=["Calm", "Mildly annoyed", "Frustrated", "Angry", "Furious"])
+      answers[0].score, answers[0].label            # 2.53, "Angry"
+
+  Verified against the live API rather than written from the docs: "this is the third time I've had to
+  chase this" comes back at **2.53**, between Frustrated and Angry, because the probability is split
+  between them. A pick-one question cannot say that.
+
+  `Answer.score` is the number, `Answer.label` is the nearest level by name, and
+  `Answer.distribution` is the spread under your own level names rather than under `"0"`, `"1"`,
+  `"2"`. Levels stay in every question rather than moving into shared guidance, for the same reason
+  option names do: they are the answer space, not wording. Checkpoint format 4, which keeps the score.
+- `judge()` can mix all three kinds in one request, because the API takes them together.
+
+### Notes
+This was found by reading LangChain's writeup on Jev as an agent evaluator, which is entirely about
+continuous scoring. The client could not do the thing the post was about.
+
+132 tests, no key and no network needed.
+
 ## v0.14.1 (2026-09-20)
 
 ### Added
