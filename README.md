@@ -93,10 +93,18 @@ Nothing clever. Four things the obvious loop does not do, in order of how much t
 ## Install
 
 ```bash
-pip install "jev-ultralightspeed[fast]"     # httpx and h2: about twice as fast
-pip install jev-ultralightspeed             # standard library only, still works
+pip install "jev-ultralightspeed[fast] @ git+https://github.com/collapseindex/jev-ultralightspeed"
 export TYPESAFE_API_KEY=...
 ```
+
+The `[fast]` extra pulls in httpx and h2, which measured about twice the standard library path.
+Without it the client still works on the standard library alone:
+
+```bash
+pip install "git+https://github.com/collapseindex/jev-ultralightspeed"
+```
+
+Not on PyPI yet.
 
 ## Use
 
