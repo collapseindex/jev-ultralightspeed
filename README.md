@@ -2,7 +2,7 @@
 
 **v0.1.0** · Apache-2.0 · no required dependencies
 
-<img src="docs/banner.png" alt="A badly drawn blue hedgehog running at light speed past the word jev" width="100%" />
+<img src="docs/infographic.png" alt="18x faster, 41% cheaper, same accuracy: 739 items a second against 41, and a million decisions in 14.7 minutes for $4.99" width="100%" />
 
 **A million decisions in 14.7 minutes for $4.99, with zero errors.** One request per item, one at a
 time, would take about 41 hours and cost three times as much.
@@ -16,8 +16,6 @@ from jev_ultralightspeed import classify
 answers = classify(messages, "Does this message need a human today?")
 urgent = [a.item for a in answers if a.yes]
 ```
-
-<img src="docs/infographic.png" alt="18x faster, 41% cheaper, same accuracy; a million decisions in 14.7 minutes for $4.99" width="100%" />
 
 ## A million items
 
