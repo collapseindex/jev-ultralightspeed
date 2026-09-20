@@ -59,6 +59,14 @@ should have a supply chain you can read in an afternoon.
   refused for a reason.
 - A sliding-window limiter holds requests under `requests_per_minute`, 1,000 by default, below
   TypeSafe's published 1,200. Raising it is your decision and your bill.
+- **The limiter is per process.** It counts the requests this client made, and knows nothing about
+  your other machines. Four workers running the default is four thousand requests a minute against
+  a twelve hundred ceiling. Divide `requests_per_minute` by the number of processes, or put a
+  shared limiter in front.
+- **It counts requests, not tokens.** A packed run of 942 requests, comfortably inside the request
+  ceiling, still drew 245 retries, which points at a limit counted in tokens that this client
+  cannot see. It backs off and carries on, but a very deep pack can spend its time being throttled
+  rather than working.
 - Items over 20,000 characters are refused before a request is built, so one runaway row cannot
   spend a fortune.
 - There is no spending cap in the library. A million items cost about five dollars at the measured

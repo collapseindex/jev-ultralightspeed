@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.2.1** · Apache-2.0 · no required dependencies
+**v0.3.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -73,6 +73,33 @@ An earlier version of this table reported the baseline at 41 items/s, about 2,46
 minute. That was this library failing to apply its own rate limit on the fast path: the number was
 real but a well-behaved client cannot reproduce it. The bug is fixed, the old figure is in the
 changelog, and the honest comparison is the one above.
+
+### Where an item sits in the request
+
+An aggregate hides a position effect that cancels out, so `bench_packing.py` asks directly. 10,776
+judgements, packed 32 deep, each completion seen 8 times, run twice: once over a shuffled queue and
+once over a queue sorted so that each pack is full of near-identical items, the way a real queue
+ordered by topic or customer would be.
+
+| | shuffled queue | sorted queue |
+| --- | ---: | ---: |
+| agreement with the human labels | 89.3% | 89.4% |
+| same answer across an item's repeats | 98.1% | 99.6% |
+| items 1-8 | 90.2% | 90.7% |
+| items 9-16 | 89.1% | 89.6% |
+| items 17-24 | 88.5% | 90.1% |
+| items 25-32 | 89.5% | 87.4% |
+| spread across positions | 1.7 points | 3.4 points |
+
+Two things worth taking from it. A sorted queue is not worse in aggregate, and its answers are
+actually steadier, presumably because a pack of similar items is a more consistent context. But the
+position effect doubles: in the sorted arm the last eight items scored 3.3 points below the first
+eight. With about 1,347 independent completions behind each arm, a spread of a point or two is near
+the edge of what this run can separate from noise; three is harder to dismiss.
+
+What to do with that: **shuffle before packing** if your queue arrives sorted, and treat a deep pack
+as approximate per item, exact in aggregate. Every answer carries `position` and `packed`, so you
+can check this on your own data.
 
 ### Three more things in that table
 
@@ -176,6 +203,7 @@ the order you passed the items in, however the requests were shuffled to get the
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
 | `cache` | True | answer repeats from memory, keyed by model, question and text. |
+| `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
 | `model` | `jev-latest` | passed straight through. |
 | `url` | the Jev endpoint | point it at a gateway or a mock. |
 
@@ -203,10 +231,11 @@ the order you passed the items in, however the requests were shuffled to get the
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 29 tests, no network, no key needed
+python -m pytest tests -q        # 33 tests, no network, no key needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
+TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
 TYPESAFE_API_KEY=... python soak.py --items 100000   # sustained load, ~50 cents
 ```
 

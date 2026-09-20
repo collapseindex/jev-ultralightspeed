@@ -38,7 +38,7 @@ from typing import Callable, Iterable, Sequence
 
 from . import _http2
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -55,6 +55,7 @@ MAX_RETRIES = 5
 TIMEOUT_S = 60.0
 MAX_ITEM_CHARS = 20_000
 WARM_TIMEOUT_S = 5.0                   # warming is an optimisation, never a wait worth minutes
+MAX_LATENCIES = 10_000                 # kept for percentiles, not forever
 
 
 class JevError(RuntimeError):
@@ -71,6 +72,8 @@ class Answer:
     kind: str = "noul"
     distribution: dict = field(default_factory=dict)
     confidence: float | None = None
+    position: int = 1             # where this item sat in its request, 1 for an unpacked one
+    packed: int = 1               # how many items shared that request
 
     @property
     def yes(self) -> bool:
@@ -143,6 +146,7 @@ class Client:
         workers: int = WORKERS,
         requests_per_minute: int = REQUESTS_PER_MINUTE,
         cache: bool = True,
+        dedupe: bool = True,
         transport: str = "auto",
     ) -> None:
         self.key = key or os.environ.get("TYPESAFE_API_KEY", "")
@@ -153,6 +157,9 @@ class Client:
         self.pack = max(1, pack)
         self.workers = max(1, workers)
         self.cache_on = cache
+        # Asking the same text twice is usually waste. It is not waste when the
+        # repeat is the measurement, so it can be turned off.
+        self.dedupe = dedupe
         if transport not in ("auto", "http2", "threads"):
             raise JevError('transport must be "auto", "http2" or "threads"')
         if transport == "http2" and not _http2.available():
@@ -216,7 +223,7 @@ class Client:
                 connection.request("POST", path, body=data, headers=headers)
                 answer = connection.getresponse()
                 payload = answer.read()
-                self.latencies.append((time.monotonic() - started) * 1000)
+                self._note_latency((time.monotonic() - started) * 1000)
                 if answer.status == 200:
                     return json.loads(payload.decode("utf-8"))
                 hint = answer.getheader("retry-after")
@@ -360,7 +367,7 @@ class Client:
         duplicates: dict[int, int] = {}
         for index in todo:
             text = texts[index]
-            if text in first_seen:
+            if self.dedupe and text in first_seen:
                 duplicates[index] = first_seen[text]
                 self.usage.cached += 1
             else:
@@ -376,12 +383,13 @@ class Client:
             bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
                       for g in groups]
             payloads = self._pipe_for().ask_all(
-                bodies, on_request=self._count, on_timing=self.latencies.append,
+                bodies, on_request=self._count, on_timing=self._note_latency,
                 on_retry=self._count_retry,
                 on_failure=lambda done: setattr(self, "last_partial", done))
             for group, data in zip(groups, payloads):
                 for position, index in enumerate(group, start=1):
-                    answer = _read(self._entry(data, position), texts[index])
+                    answer = _read(self._entry(data, position), texts[index],
+                                   position, len(group))
                     answers[index] = answer
                     self._remember(texts[index], instructions, criteria, options, answer)
                 done += len(group)
@@ -389,12 +397,14 @@ class Client:
                     on_progress(done, len(unique))
         elif groups:
             pool = self._pool_for()
+            self.last_partial = []
             for group, result in zip(groups, pool.map(
                 lambda g: self._ask_group([texts[i] for i in g], instructions, criteria, options),
                 groups,
             )):
                 for index, answer in zip(group, result):
                     answers[index] = answer
+                    self.last_partial.append(answer)      # kept if a later group fails
                     self._remember(texts[index], instructions, criteria, options, answer)
                 done += len(group)
                 if on_progress:
@@ -427,7 +437,7 @@ class Client:
                    criteria: dict | None, options: dict | None) -> list[Answer]:
         data = self.ask(self._body(texts, instructions, criteria, options))
         self._count(data)
-        return [_read(self._entry(data, position), text)
+        return [_read(self._entry(data, position), text, position, len(texts))
                 for position, text in enumerate(texts, start=1)]
 
     def _count(self, data: dict) -> None:
@@ -436,6 +446,13 @@ class Client:
             self.usage.requests += 1
             self.usage.input_tokens += int(usage.get("input_tokens") or 0)
             self.usage.output_tokens += int(usage.get("output_tokens") or 0)
+
+    def _note_latency(self, milliseconds: float) -> None:
+        """The last few thousand, so a long-lived client does not grow a list forever."""
+        with self._books:
+            self.latencies.append(milliseconds)
+            if len(self.latencies) > MAX_LATENCIES:
+                del self.latencies[:len(self.latencies) - MAX_LATENCIES]
 
     def _count_retry(self) -> None:
         with self._books:
@@ -495,21 +512,24 @@ def _packed_body(model, texts: Sequence[str], instructions, criteria, options) -
 def _copy_answer(answer: "Answer", text: str) -> "Answer":
     """The same answer for another copy of the text, sharing nothing mutable."""
     return Answer(item=text, p=answer.p, label=answer.label, kind=answer.kind,
-                  distribution=dict(answer.distribution), confidence=answer.confidence)
+                  distribution=dict(answer.distribution), confidence=answer.confidence,
+                  position=answer.position, packed=answer.packed)
 
 
-def _read(entry: dict, text: str) -> Answer:
+def _read(entry: dict, text: str, position: int = 1, packed: int = 1) -> Answer:
     if "noul" in entry:
         p = float(entry["noul"])
         return Answer(item=text, p=p, label="yes" if p >= 0.5 else "no", kind="noul",
                       distribution={"yes": p, "no": 1.0 - p},
-                      confidence=_float_or_none(entry.get("confidence")))
+                      confidence=_float_or_none(entry.get("confidence")),
+                      position=position, packed=packed)
     if "choice" in entry:
         distribution = {str(k): float(v) for k, v in (entry.get("probabilities") or {}).items()}
         label = str(entry["choice"])
         return Answer(item=text, p=distribution.get(label, 0.0), label=label, kind="choice",
                       distribution=distribution,
-                      confidence=_float_or_none(entry.get("confidence")))
+                      confidence=_float_or_none(entry.get("confidence")),
+                      position=position, packed=packed)
     raise JevError(f"unreadable answer: {list(entry)[:5]}")
 
 
@@ -533,7 +553,7 @@ def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
     """One call for the common case. Keyword arguments go to `Client`."""
     client_arguments = {name: kwargs.pop(name) for name in
                         ("key", "url", "model", "pack", "workers", "requests_per_minute",
-                         "cache", "transport")
+                         "cache", "dedupe", "transport")
                         if name in kwargs}
     client = Client(**client_arguments)
     try:

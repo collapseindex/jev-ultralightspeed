@@ -311,3 +311,49 @@ def test_a_client_closes_itself():
         client.classify(["a", "b"], QUESTION)
         assert client._pool is not None
     assert client._pool is None
+
+
+def test_every_answer_says_where_it_sat():
+    client = Fake(pack=4, workers=1)
+    answers = client.classify([f"item {n}" for n in range(6)], QUESTION)
+    assert [a.position for a in answers] == [1, 2, 3, 4, 1, 2]
+    assert [a.packed for a in answers] == [4, 4, 4, 4, 2, 2]
+    alone = Fake(pack=1).classify(["only"], QUESTION)
+    assert (alone[0].position, alone[0].packed) == (1, 1)
+
+
+def test_deduplication_can_be_turned_off_for_measuring_consistency():
+    on = Fake(pack=8)
+    on.classify(["same", "same", "same"], QUESTION)
+    assert len(on.sent) == 1 and sum(len(b["state"]) for b in on.sent) == 1
+
+    off = Fake(pack=8, dedupe=False)
+    off.classify(["same", "same", "same"], QUESTION)
+    assert sum(len(b["state"]) for b in off.sent) == 3, "each copy has to be asked"
+
+
+def test_what_arrived_before_a_failure_is_kept_on_the_threaded_path():
+    class FailsLate(Fake):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.calls = 0
+
+        def ask(self, body):
+            self.calls += 1
+            if self.calls > 1:
+                raise JevError("the second request fell over")
+            return super().ask(body)
+
+    client = FailsLate(pack=2, workers=1)
+    with pytest.raises(JevError):
+        client.classify(["a", "b", "c", "d"], QUESTION)
+    assert len(client.last_partial) == 2, "the first group's answers should survive"
+
+
+def test_latencies_do_not_grow_forever():
+    from jev_ultralightspeed import MAX_LATENCIES
+
+    client = Fake()
+    for _ in range(MAX_LATENCIES + 250):
+        client._note_latency(1.0)
+    assert len(client.latencies) == MAX_LATENCIES

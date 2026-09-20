@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.0 (2026-09-20)
+
+A fourth review asked two questions a throughput benchmark does not answer, so they were measured.
+
+### Added
+- **`bench_packing.py`, and the finding it produced.** 10,776 judgements, packed 32 deep, over a
+  shuffled queue and over a queue sorted so each pack is full of near-identical items. A sorted
+  queue is not worse in aggregate (89.4% against 89.3%) and is steadier (99.6% against 98.1%), but
+  the position effect doubles: in the sorted arm the last eight items of a request scored 3.3
+  points below the first eight. Shuffle before packing if your queue arrives sorted.
+- **`position` and `packed` on every answer**, so anyone can check that on their own data instead
+  of taking this repository's word for it.
+- **`dedupe=False`**, because deduplication is a trap when the repeat is the measurement: with it
+  on, asking the same item twenty times costs one request and returns twenty copies, which looks
+  like perfect consistency and is not.
+
+### Fixed
+- `last_partial` was only filled on the HTTP/2 path, so what survived a failure depended on which
+  transport you were using.
+- `latencies` grew without bound on a long-lived client; the last 10,000 are kept.
+
+### Changed
+- SECURITY.md says the limiter is per process and counts requests, not tokens: four workers on the
+  default ceiling is four thousand requests a minute against a limit of twelve hundred, and 942
+  packed requests drew 245 retries while comfortably inside the request ceiling.
+
 ## v0.2.1 (2026-09-20)
 
 A third review, mostly of the previous review's fixes.

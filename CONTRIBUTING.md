@@ -9,7 +9,7 @@ rather than ceremony.
 git clone https://github.com/collapseindex/jev-ultralightspeed.git
 cd jev-ultralightspeed
 pip install pytest
-python -m pytest tests -q          # 29 tests, no network, no key needed
+python -m pytest tests -q          # 33 tests, no network, no key needed
 ```
 
 The tests replace the one method that talks to the API, so packing, ordering, deduplication, the
