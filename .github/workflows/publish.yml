@@ -1,0 +1,52 @@
+name: publish
+
+# Publishes to PyPI when a GitHub release is published, using trusted
+# publishing: PyPI verifies this workflow's identity, so there is no API token
+# anywhere in the repository or the settings.
+#
+#   git tag v0.1.0 && git push --tags
+#   gh release create v0.1.0 --generate-notes
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest tests -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi                     # must match the PyPI publisher's environment
+    permissions:
+      id-token: write                     # how PyPI checks this workflow is who it says
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
