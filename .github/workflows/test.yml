@@ -32,8 +32,13 @@ jobs:
       - run: python -m pytest tests -q
       - name: HTTP/2 was really negotiated, not silently fallen back to
         # The only place this can be checked: a TLS interceptor on a developer
-        # machine re-signs even loopback, and then the test skips itself.
-        run: python -m pytest tests -q -k http2_server -v --no-header -rA
+        # machine re-signs even loopback, and then the test skips itself. A skip
+        # here would otherwise be a green tick over an unverified claim, so the
+        # pass is looked for rather than the absence of a failure.
+        run: |
+          python -m pytest tests -k negotiates_http2 --no-header -rA | tee h2.log
+          grep -q "1 passed" h2.log || {
+            echo "the HTTP/2 test did not pass here; a skip is not good enough"; exit 1; }
       - name: the fast transport is the one chosen
         run: |
           python - <<'PY'
