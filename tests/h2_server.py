@@ -143,11 +143,10 @@ class H2Server:
             self.protocols.add(tls.selected_alpn_protocol() or "none")
 
         connection = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False))
-        connection.initiate_connection()
-        tls.sendall(connection.data_to_send())
-
         bodies: dict[int, bytearray] = {}
         try:
+            connection.initiate_connection()
+            tls.sendall(connection.data_to_send())
             while self._running:
                 data = tls.recv(65535)
                 if not data:
@@ -194,6 +193,19 @@ class H2Server:
             ("content-length", str(len(payload))),
         ])
         connection.send_data(stream_id, payload, end_stream=True)
+
+    def reset(self) -> None:
+        """
+        Forget what has been counted so far.
+
+        The interception check opens a connection of its own, without ALPN, so
+        anything asserting on how the client connected has to start from here.
+        """
+        with self._lock:
+            self.seen = 0
+            self.connections = 0
+            self.streams = 0
+            self.protocols.clear()
 
     def close(self) -> None:
         self._running = False

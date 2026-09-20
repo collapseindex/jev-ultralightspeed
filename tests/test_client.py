@@ -1105,6 +1105,7 @@ def an_h2_server():
     if excuse:
         server.close()
         pytest.skip(excuse)
+    server.reset()          # the check above connected too, and without ALPN
     return server, client_context(server.ca_path)
 
 
