@@ -45,7 +45,8 @@ def available() -> bool:
 KEEPALIVE_S = 60.0              # httpx drops an idle connection after 5s by default, which
                                 # makes every call in an intermittent job pay the handshake
 ADMIT_SLICE_S = 0.25            # how long to wait for room before looking up again
-MAX_WAIT_S = 60.0               # nothing waits longer than this on one attempt
+MAX_WAIT_S = 60.0               # the longest wait this client invents for itself
+MAX_HINT_S = 300.0              # the longest it will sit on one the server asked for
 HINT_JITTER_S = 1.0             # spread on top of the server's own number
 
 
@@ -77,12 +78,23 @@ def _backoff(attempt: int, retry_after: str | None) -> float:
     """
     How long to wait. The server's own Retry-After is a minimum rather than an
     answer: every worker given the same hint would otherwise come back at the
-    same instant, so jitter goes on top of it, never underneath. Without a hint,
-    doubling with jitter.
+    same instant, so jitter goes on top of it, never underneath.
+
+    What is not capped is the hint. Clamping "wait two minutes" to sixty seconds
+    meant coming back early, against the one instruction the server gave, which
+    is how a throttle turns into a ban. Only the wait this client invents for
+    itself is bounded. A hint longer than `MAX_HINT_S` is refused rather than
+    quietly shortened or silently slept on, because at that point the answer is
+    to come back later rather than to hold a process open.
     """
     hint = _retry_after_seconds(retry_after)
     if hint is not None:
-        return min(MAX_WAIT_S, hint + random.random() * HINT_JITTER_S)
+        if hint > MAX_HINT_S:
+            from . import JevError
+
+            raise JevError(f"the server asked for {hint:.0f}s before retrying, which is longer "
+                           f"than the {MAX_HINT_S:.0f}s this client will wait. Try again later.")
+        return hint + random.random() * HINT_JITTER_S
     return min(MAX_WAIT_S, min(30.0, 2 ** attempt) * (0.5 + random.random()))
 
 

@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.10.1** · Apache-2.0 · no required dependencies
+**v0.10.2** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -237,9 +237,13 @@ answers = classify(tickets, "Which team should handle this?", options={
 Every answer carries `item`, `label`, `p`, `distribution`, `confidence` and `kind`, and comes back in
 the order you passed the items in, however the requests were shuffled to get there.
 
-`p` is the lever that matters most. Sorting by it and setting aside the fifth the judge is least sure
-about takes agreement with human labels from 89.7% to **96.8%**, which is the annotators' own
-agreement rate. See [Knowing which verdicts to trust](#knowing-which-verdicts-to-trust).
+How sure the judge is, `answer.certainty`, is the lever that matters most. Setting aside the fifth it
+is least sure about takes agreement with human labels from 89.7% to **96.8%**, which is the
+annotators' own agreement rate. See [Knowing which verdicts to trust](#knowing-which-verdicts-to-trust).
+
+For a pick-one question `certainty` is `p`, the chosen option's own probability. For a yes/no question
+it is not: `p` is the probability of **yes**, so 0.01 is a confident no. Rank by `certainty` or let
+`triage` do it.
 
 ### Knobs
 
@@ -411,6 +415,10 @@ TYPESAFE_API_KEY=... python bench_confidence.py     # collects for ~12 cents, th
 python bench_confidence.py --analyse data/results/<file>
 ```
 
+`triage` ranks by `answer.certainty`, which for a yes/no question is not `p`: `p` is the probability
+of yes, so a confident no has a low one. The table above is from a pick-one question, where the two
+are the same number, and it was recomputed both ways to be sure: 96.78% either way.
+
 The run behind that table is committed, so the analysis can be re-cut or argued with **with no key
 and no spending**:
 
@@ -563,7 +571,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 103 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 111 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls

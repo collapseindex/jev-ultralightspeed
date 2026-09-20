@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -109,6 +109,22 @@ class Answer:
     def ok(self) -> bool:
         """False for a skipped item. Check this before trusting `label`."""
         return self.error is None
+
+    @property
+    def certainty(self) -> float:
+        """
+        How sure the judge is of the answer it actually gave, which is not `p`.
+
+        For a yes/no question `p` is the probability of **yes**, so 0.01 is a very
+        confident no. Sorting by `p` there throws out the answers it is surest
+        about first, which is what `triage` used to do. For a pick-one question
+        `p` is already the chosen option's own probability, so the two agree.
+        """
+        if not self.ok:
+            return 0.0
+        if self.kind == "noul":
+            return max(self.p, 1.0 - self.p)
+        return self.p
 
 
 @dataclass
@@ -932,6 +948,10 @@ def triage(answers: Sequence[Answer], *, keep: float | None = None,
         trusted, review = triage(answers, keep=0.8)
         trusted, review = triage(answers, at_least=0.92)
 
+    Ranked by `Answer.certainty`, which for a yes/no question is not `p`: `p` is
+    the probability of yes, so a confident no has a low one. `keep` hands back
+    exactly the share asked for even when scores tie.
+
     This is the one lever that moves agreement, and it moves it a long way. On
     the 1,347 human-labelled completions in dinostomp's `xstest-refusal` pod,
     with the cut chosen on one half and measured on the other:
@@ -952,17 +972,19 @@ def triage(answers: Sequence[Answer], *, keep: float | None = None,
     """
     if (keep is None) == (at_least is None):
         raise JevError("say one of keep or at_least, not both and not neither")
-    if keep is not None:
+    usable = [index for index, answer in enumerate(answers) if answer.ok]
+    if at_least is not None:
+        chosen = {index for index in usable if answers[index].certainty >= at_least}
+    else:
         if not 0.0 <= keep <= 1.0:
             raise JevError("keep is a fraction between 0 and 1")
-        sure = [answer for answer in answers if answer.ok]
-        wanted = int(len(sure) * keep)
-        if wanted <= 0:
-            at_least = 1.1                       # trust nothing
-        else:
-            at_least = sorted((answer.p for answer in sure), reverse=True)[wanted - 1]
-    trusted = [a for a in answers if a.ok and a.p >= at_least]
-    review = [a for a in answers if not (a.ok and a.p >= at_least)]
+        # Exactly the share asked for, and ties broken by where the answer came
+        # in. Taking everything at or above the cut hands back all ten of ten
+        # answers that scored the same when two were wanted.
+        ranked = sorted(usable, key=lambda index: (-answers[index].certainty, index))
+        chosen = set(ranked[:int(len(usable) * keep)])
+    trusted = [answer for index, answer in enumerate(answers) if index in chosen]
+    review = [answer for index, answer in enumerate(answers) if index not in chosen]
     return trusted, review
 
 

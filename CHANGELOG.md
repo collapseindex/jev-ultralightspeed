@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.10.2 (2026-09-20)
+
+Three things reproduced from a review, all of them introduced earlier today, all of them in the parts
+added fastest.
+
+### Fixed
+- **`triage` threw out the answers it was surest about, on yes/no questions.** It ranked by `p`, and
+  for a yes/no question `p` is the probability of **yes**, so a 0.01 is a confident no and went to the
+  bottom of the pile. Reproduced as `triage(keep=0.5)` keeping a 60% yes over a 99% no. There is now
+  `Answer.certainty`, which is `max(p, 1 - p)` for a yes/no answer, the chosen option's own probability
+  for a pick-one, and zero for a skipped one, and `triage` ranks by it.
+
+  **The published table is unaffected and this was checked rather than assumed.** It came from a
+  pick-one question, where the two numbers are the same; the 9 records in 8,082 where the chosen label
+  was not the most probable are near-ties at around 0.45 that land in the review pile either way. The
+  81% slice is **96.78% under both rankings**, to two decimal places.
+- **`keep` handed back everything when scores tied.** Ten answers at 0.9 with `keep=0.2` returned all
+  ten as trusted, because the share was turned into a threshold and then everything at or above it was
+  kept. It selects exactly the share asked for now, ties broken by the order the answers arrived in.
+- **A long `Retry-After` was quietly shortened.** `Retry-After: 120` produced a 60 second wait, because
+  the cap meant for this client's own invented backoff was applied to the server's instruction as well.
+  Coming back early against the one thing the server asked for is how a throttle becomes a ban. The
+  hint is honoured in full now; only the backoff this client invents is capped. A hint over 300 seconds
+  is refused with a clear error rather than shortened or slept on, because by then the answer is to
+  come back later, not to hold a process open.
+
+111 tests, no key and no network needed.
+
 ## v0.10.1 (2026-09-20)
 
 ### Fixed

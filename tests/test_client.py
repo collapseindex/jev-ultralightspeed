@@ -1500,3 +1500,80 @@ def test_pacing_is_off_unless_asked_for(transport):
         client.close()
         server.close()
     assert server.seen == 2
+
+
+# -- certainty is not the probability of yes ---------------------------------
+
+def test_certainty_reads_a_confident_no_as_confident():
+    from jev_ultralightspeed import Answer
+
+    assert Answer(item="x", p=0.01, label="no").certainty == 0.99
+    assert Answer(item="x", p=0.99, label="yes").certainty == 0.99
+    assert Answer(item="x", p=0.50, label="yes").certainty == 0.50
+    assert Answer(item="x", p=0.60, label="yes").certainty == 0.60
+
+
+def test_a_pick_one_answer_is_already_its_own_certainty():
+    from jev_ultralightspeed import Answer
+
+    answer = Answer(item="x", p=0.93, label="refusal", kind="choice",
+                    distribution={"refusal": 0.93, "compliance": 0.07})
+    assert answer.certainty == 0.93
+
+
+def test_a_skipped_answer_is_certain_of_nothing():
+    """max(p, 1-p) on a skipped answer's p of zero would read as total confidence."""
+    from jev_ultralightspeed import Answer
+
+    assert Answer(item="x", p=0.0, label="", kind="error", error="unreadable").certainty == 0.0
+
+
+def test_triage_prefers_a_confident_no_to_an_unsure_yes():
+    """
+    It used to rank yes/no answers by the probability of yes, so the answers it
+    was surest about were the first ones thrown out.
+    """
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.60, 0.01])
+    trusted, review = triage(answers, keep=0.5)
+    assert [a.item for a in trusted] == ["item 1"], "the confident no was not the one kept"
+    assert [a.item for a in review] == ["item 0"]
+
+
+def test_triage_with_a_threshold_also_reads_certainty():
+    from jev_ultralightspeed import triage
+
+    trusted, review = triage(make_answers([0.05, 0.5, 0.95]), at_least=0.9)
+    assert [a.item for a in trusted] == ["item 0", "item 2"]
+    assert [a.item for a in review] == ["item 1"]
+
+
+def test_keep_hands_back_the_share_asked_for_even_when_scores_tie():
+    """Ten answers at the same score and two wanted used to hand back all ten."""
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.9] * 10)
+    trusted, review = triage(answers, keep=0.2)
+    assert len(trusted) == 2, f"{len(trusted)} of 10 came back as trusted"
+    assert len(review) == 8
+    assert [a.item for a in trusted] == ["item 0", "item 1"], "ties are not broken by arrival"
+
+
+def test_a_long_retry_after_is_honoured_not_shortened():
+    """
+    Clamping "wait two minutes" to sixty seconds means coming back early against
+    the one instruction the server gave.
+    """
+    from jev_ultralightspeed import _http2
+
+    assert 120.0 <= _http2._backoff(0, "120") <= 121.0
+    assert 240.0 <= _http2._backoff(5, "240") <= 241.0
+    assert _http2._backoff(9, None) <= 60.0, "our own doubling is still bounded"
+
+
+def test_a_ridiculous_retry_after_is_refused_rather_than_slept_on():
+    from jev_ultralightspeed import JevError, _http2
+
+    with pytest.raises(JevError, match="longer than"):
+        _http2._backoff(0, "3600")
