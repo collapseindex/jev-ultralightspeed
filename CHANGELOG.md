@@ -55,7 +55,10 @@ v0.5.0.
   to 1,777 billed input tokens** with all 32 labels unchanged. Not the default, because a prompt
   change needs the paired accuracy run first and one request is not an accuracy result.
 
-72 tests, no key and no network needed.
+74 tests, no key and no network needed. Two of them are about this file: the README badge sat at
+v0.3.1 through three releases because the bump touched `pyproject.toml` and `__init__.py` and nothing
+checked the other two places, and the test count in the README had been hand-edited five times. Both
+are asserted now rather than remembered.
 
 ## v0.5.0 (2026-09-20)
 

@@ -1052,3 +1052,37 @@ def test_small_items_still_pack_to_the_limit():
     client = Fake(pack=16)
     client.classify([f"item {n}" for n in range(32)], QUESTION)
     assert [len(body["state"]) for body in client.sent] == [16, 16]
+
+
+def test_every_place_that_states_a_version_agrees():
+    """
+    The README badge sat at v0.3.1 through three releases, because the bump
+    touched pyproject and __init__ and nothing checked the fourth place.
+    """
+    import re
+    import jev_ultralightspeed
+
+    root = Path(__file__).resolve().parents[1]
+    packaged = re.search(r'^version = "([^"]+)"',
+                         (root / "pyproject.toml").read_text(encoding="utf-8"),
+                         re.M).group(1)
+    badge = re.search(r"^\*\*v([0-9][^*]*)\*\*",
+                      (root / "README.md").read_text(encoding="utf-8"), re.M).group(1)
+    latest = re.search(r"^## v([0-9][^ ]*)",
+                       (root / "CHANGELOG.md").read_text(encoding="utf-8"), re.M).group(1)
+    assert jev_ultralightspeed.__version__ == packaged == badge == latest, {
+        "__version__": jev_ultralightspeed.__version__, "pyproject": packaged,
+        "README badge": badge, "CHANGELOG": latest,
+    }
+
+
+def test_the_readme_states_the_number_of_tests_there_are(request):
+    """Hand-counted five times, wrong twice. Counted here instead."""
+    import re
+
+    if request.config.option.keyword or request.config.option.markexpr:
+        pytest.skip("only meaningful when the whole suite ran")
+    root = Path(__file__).resolve().parents[1]
+    stated = int(re.search(r"# (\d+) tests", (root / "README.md").read_text(encoding="utf-8"))
+                 .group(1))
+    assert stated == len(request.session.items)
