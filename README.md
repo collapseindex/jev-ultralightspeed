@@ -1,8 +1,8 @@
 # jev-ultralightspeed
 
-**v0.12.0** · Apache-2.0 · no required dependencies
+**v0.13.0** · Apache-2.0 · no required dependencies
 
-<img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
+<img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
 **You have a pile of text and one question about each.** Fifty thousand support tickets to triage.
 A quarter of reviews to sort by sentiment. A month of logs to flag. A column to backfill on a table
@@ -16,9 +16,10 @@ answers = classify(tickets, "Does this message need a human to act on it today?"
 urgent = [a.item for a in answers if a.yes]
 ```
 
-**26.5x the throughput of one request per item, for 41% less money, with no accuracy difference
-this benchmark can detect.** Measured over 30,000 judgements against human labels, both arms under
-TypeSafe's published rate limit, with a script in this repository.
+**32x the throughput of one request per item, for 41% less money, with no accuracy difference this
+benchmark can detect.** The 32 is the pack depth, and under a ceiling counted in requests that is
+arithmetic rather than a measurement. The 41% and the accuracy are measured, over 30,000 judgements
+against human labels, with a script in this repository.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
@@ -36,19 +37,33 @@ itself**, same question, same items, same criteria, same machine.
 
 | | regular jev | jev + ultralightspeed |
 | --- | ---: | ---: |
-| throughput | 16.7 items/s | **441.0 items/s** |
-| wall clock | 30 minutes | **68 seconds** |
-| requests | 30,000 | 942 |
+| items on one unit of the ceiling | 1 | **32** |
+| items/s at 1,000 requests a minute | 16.7 | **533** |
+| requests for 30,000 judgements | 30,000 | 940 |
 | cost | $0.729 | **$0.430** |
-| agreement with the human labels | 89.3% (87.5 to 90.8) | 89.2% (87.5 to 90.7) |
+| agreement with the human labels | 89.2% (87.5 to 90.8) | 89.2% (87.6 to 90.8) |
 | same answer across an item's repeats | 99.6% | 98.1% |
 | failed | 0 | 0 |
-| retried | 1 | 245 |
+| retried | 1 | 0 |
 
-**26.5x the throughput and 41% less money.** On accuracy, the honest statement is a paired one:
-over the 1,347 completions, packed minus one-per-request is **−0.09 points, 95% interval −0.83 to
-+0.61**, which sits inside a two point margin. That is "no difference worth caring about at this
-sample size", not proof of equivalence.
+**The throughput row is arithmetic and that is the point.** A ceiling counted in requests does not
+care what a request contains, so 32 items on one beats 1 item on one by 32, and no run can do better
+than that without borrowing from somebody. The unpacked arm proves the model: 30,000 requests in
+1,801 seconds is 999 a minute against a ceiling of 1,000, and 16.67 items a second to three figures.
+
+**Two earlier numbers here were that 32 bent by something else, and both are withdrawn.** The first
+said 26.5x, because the arms ran one after the other and the packed arm went second, after half an
+hour of load: it took **245 retries against the other's 1**, and the waiting cost it 17% of its rate.
+Running them in alternating turns instead, the retries went to **zero** and the shortfall with them,
+which settles what those 245 were. The second said 43.9x, from that same rerun, because sharing one
+ceiling let the packed arm use the headroom the other was not touching while it waited its turn: it
+ran at 1,372 requests a minute, and 730 items a second is not a rate anything can sustain. Alone at
+the ceiling it does 532, which is the arithmetic again.
+
+**The accuracy is the measured part, and it got tighter.** Over the 1,347 completions, packed minus
+one-per-request is **+0.01 points, 95% interval −0.72 to +0.75**, against −0.09 and −0.83 to +0.61
+before, with both arms landing on 89.2%. Inside a two point margin either way, which is "no
+difference worth caring about at this sample size" and not proof of equivalence.
 
 **89% is not 89% of a perfect score.** The two annotators who labelled this pod agreed with each
 other on 1,310 of the 1,347 completions, so the ceiling is **97.3%**, not 100%, and the remaining
@@ -70,7 +85,7 @@ That is arithmetic, not a slow client: the baseline here sits at 16.7 items/s be
 holds it under the ceiling, and no well-behaved client can do better one item at a time.
 
 Packing is the only way past it. Thirty-two items in one request spends one unit of the budget
-instead of thirty-two, which is why the packed arm reaches 441 items/s while making a thirtieth of
+instead of thirty-two, which is why the packed arm reaches 533 items/s while making a thirtieth of
 the requests.
 
 An earlier version of this table reported the baseline at 41 items/s, about 2,460 requests a
@@ -113,44 +128,29 @@ to 99.6% of the time. Treating them as 30,000 independent draws would report an 
 times narrower than the evidence supports. `bench_eval.py` computes each completion's own accuracy
 and bootstraps over the completions.
 
-**245 retries against the baseline's 1.** The packed arm made 942 requests in 68 seconds, which is
-831 a minute, well under the published 1,200, and still got pushed back 245 times. At $0.430 of
-input in 68 seconds it was moving about **9M input tokens a minute** against the baseline's 578K.
+**The 245 retries were an artifact of going second, and they are gone.** The first version of this
+benchmark ran the arms one after the other, unpacked first. That arm needs 30,000 requests, so it held
+the floor for half an hour before the packed arm started, and the packed arm then took 245 retries
+against its 1. Two explanations were floated here at various points, that a token-counted limit was
+binding and that the service was simply busy, and both were guesses. Running the arms in alternating
+turns instead answered it: **zero retries**, and the 17% rate shortfall went with them.
 
-An earlier version of this README said that proved a token-counted limit was binding. It does not.
-TypeSafe documents 250,000 tokens a second, which is 15M a minute, so 9M is *below* the published
-token ceiling on average, and bursts inside a second, a changing allocation, or plain service
-overload all explain 245 pushbacks equally well. That run did not keep the status codes or a
-short-window send trace, so it cannot tell them apart. Corrected rather than deleted, because the
-wrong version was published.
+Which also thins out the token-limit story that replaced it. At $0.430 of input in 68 seconds the
+packed arm was moving about 9M input tokens a minute against a documented 250,000 a second, or 15M a
+minute, so it was never near that ceiling and never needed to be.
 
-What does survive: 26.5x is the gap between *which* ceiling each arm happens to hit, so it is a
-ceiling and not a floor. Under TypeSafe's published limits it is what you get, and it is measured.
-The part that does not depend on anyone's rate tier is the token saving: **41% fewer tokens, so
-about 1.7x**. Treat 26.5x as the number most likely to move on someone else's account and 1.7x as
-the one that will not. Nothing failed either way: the client backs off with jitter, honours
-`Retry-After` as a floor with jitter on top, and frees its slot while it waits.
+What survives is the part that does not depend on anyone's rate tier at all: **41% fewer tokens, so
+about 1.7x** on a token-counted allocation rather than a request-counted one. Treat the 32x as what a
+request ceiling buys you and the 1.7x as what a token ceiling does.
 
-**26.5x is the conservative end of this benchmark, and it moves with luck.** The baseline arm cannot
-vary: one item a request at 1,000 requests a minute is **16.7 items/s** by arithmetic, so the whole
-ratio is the packed arm divided by 16.7. The packed arm measured 441 against a 533 ceiling because of
-its 245 retries, and later runs on the same endpoint have seen none at all. A rerun on a quiet day
-would land near **32x** without a line of code changing, which is the honest reason this figure has
-not been refreshed: raising it would be reporting a better afternoon, not a better client.
+**How much room is left: none worth chasing, and the run proves the model.** The unpacked arm sent
+30,000 requests in 1,801 seconds, which is **999 a minute against a ceiling of 1,000**, and 16.67 items
+a second to three figures. The client reaches its configured ceiling and the ceiling is the wall. At
+`pack=32` that wall is 533 items/s, and getting past it needs a higher allocation, fewer tokens an
+item, or fewer items, not a faster client.
 
-**How much room is left, and where it probably went.** At `pack=32` and the default 1,000 requests a
-minute the ceiling is **533 items/s**. The measured 441 is 17.3% below it, and reaching it would be a
-20.9% improvement.
-
-That gap is most likely the 245 retries. 942 successful requests in 68 seconds is 831 a minute, and
-the request rate falling 16.9% short of the ceiling accounts for almost exactly the 17.3% shortfall in
-items. Where the time went can be estimated but not proved from that run: eight workers over 68
-seconds is 544 worker-seconds, 942 requests at the 318ms mean latency measured today would be about
-300 of them, and the 244 left over against 245 retries is close to a second each, which is what the
-backoff asks for on an early attempt. Consistent, not established: the run recorded neither the status
-codes nor the time spent waiting, so retries cannot be separated from a slower service that day. That
-gap is closed for next time. `usage.pushback` now counts retries by status code and `usage.waited` adds
-up the time spent sitting them out, so a slow run says why it was slow:
+A slow run can now say why it was slow, which is how the 245 were finally settled. `usage.pushback`
+counts retries by status code and `usage.waited` totals the time spent sitting them out:
 
     8 items in 1.00s (8.0/s, 8 requests, 3 retried (2x429, 1x503, 0.6s waiting), ...)
 
@@ -188,7 +188,7 @@ was optimistic by about a fifth, as well as circular, since in a burst the measu
 latency bound. Raise `workers` if you raise `requests_per_minute`, or if you see the request rate
 falling short. Otherwise leave it. `bench_workers.py` reruns this for about ten cents.
 
-It is also not compute-bound. At 441 items/s and 341 tokens an item it is moving roughly 600 KB/s of
+It is also not compute-bound. At 533 items/s and 341 tokens an item it is moving roughly 700 KB/s of
 JSON, so `orjson`, `uvloop` and more cores have nothing to do here. Every remaining lever is about
 permission: fewer tokens, fewer requests, more ceiling, or not asking at all.
 
@@ -225,7 +225,7 @@ three are what stop it becoming the next bottleneck:
 1. **Pack.** Several items go in one request as `item_1..item_N`, each with its own question that
    names the item it judges. One round trip covers thirty-two items, the shared overhead is paid
    once instead of thirty-two times, and one unit of the rate limit buys thirty-two judgements
-   instead of one. Against a limit counted in requests, this is essentially the entire 26.5x.
+   instead of one. Against a limit counted in requests, this is the entire 32x.
 2. **Parallel.** Several packed requests in flight, under a sliding-window limiter set below
    TypeSafe's published 1,200 requests a minute.
 3. **One connection, kept open, multiplexed.** With httpx and h2 installed, every request in flight
@@ -442,9 +442,10 @@ published 1,200, and at `pack=64` it pushed past the documented 250,000 tokens a
 Retries across all eight: **zero**. So on the public endpoint, today, pacing had nothing to fix, and
 turning it on can only make a short job slower.
 
-It is here because the 245 retries in the headline benchmark are still unexplained, and because
-somebody on a stricter allocation may meet a throttle we cannot. If `usage.retries` is climbing, try
-it. If it is not, do not.
+It was kept partly because the headline benchmark's 245 retries were unexplained. They are explained
+now: the packed arm was going second, after half an hour of load, and alternating the turns took them
+to zero. So the only argument left for pacing is that somebody on a stricter allocation may meet a
+throttle this account does not. If `usage.retries` is climbing, try it. If it is not, do not.
 
 ```bash
 python bench.py --throttle --items 256 --rounds 3    # the table above, no key needed

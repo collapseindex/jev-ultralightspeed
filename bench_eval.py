@@ -127,7 +127,9 @@ def arm(name, texts, gold, source, unique, *, pack, workers, limiter, blocks=BLO
     return {"name": name, "rate": len(texts) / seconds, "usd": client.usage.usd,
             "per_item": per_item, "accuracy": accuracy, "seconds": seconds,
             "requests": client.usage.requests, "retries": client.usage.retries,
-            "pushback": dict(client.usage.pushback), "waited": client.usage.waited}
+            "pushback": dict(client.usage.pushback), "waited": client.usage.waited,
+            "pack": pack, "per_minute": client.usage.requests / seconds * 60,
+            "alone": len(texts) / (client.usage.requests / (REQUESTS_PER_MINUTE / 60))}
 
 
 def main():
@@ -164,8 +166,29 @@ def main():
     differences = [f - s for f, s in zip(fast["per_item"], slow["per_item"])]
     gap = statistics.mean(differences)
     low, high = bootstrap_interval(differences, statistics.mean)
-    print(f"\n{fast['rate'] / slow['rate']:.1f}x the throughput, "
-          f"{(1 - fast['usd'] / slow['usd']) * 100:.0f}% less money")
+    # The claim is arithmetic and always was. Under a ceiling counted in requests,
+    # a request carrying 32 items beats one carrying 1 by 32, and no measurement
+    # can do better than that or worse without something else going on.
+    ratio = fast["pack"] / slow["pack"]
+    print(f"\n**{ratio:.1f}x the throughput**, which is the pack depth, and "
+          f"{(1 - fast['usd'] / slow['usd']) * 100:.0f}% less money, which is measured.")
+    print(f"\nWhat the arms actually did, and why neither rate is the claim:")
+    for result in (slow, fast):
+        print(f"  {result['name']:<22}{result['rate']:>8.1f} items/s at "
+              f"{result['per_minute']:>6.0f} requests/min"
+              + (f", {result['retries']} retried" if result["retries"] else ""))
+    together = ((slow["requests"] + fast["requests"])
+                / (slow["seconds"] + fast["seconds"]) * 60)
+    verdict = ("so it held" if together <= REQUESTS_PER_MINUTE * 1.05
+               else "so the run was too short to fill the limiter's minute")
+    print(f"  the pair against a shared ceiling of {REQUESTS_PER_MINUTE}: "
+          f"{together:.0f} requests/min, {verdict}.")
+    if fast["per_minute"] > REQUESTS_PER_MINUTE * 1.05:
+        print(f"  The packed arm went over its share while the other waited its turn, so its "
+              f"{fast['rate']:.1f}\n  items/s is borrowed. Alone at the ceiling it would do "
+              f"{fast['alone']:.0f}.")
+    if slow["per_minute"] > REQUESTS_PER_MINUTE * 1.05:
+        print(f"  The unpacked arm went over its share, so its rate is borrowed too.")
     print(f"accuracy difference, packed minus one per request, paired over {unique:,} completions: "
           f"{gap * 100:+.2f} points, 95% {low * 100:+.2f} to {high * 100:+.2f}")
     margin = 0.02

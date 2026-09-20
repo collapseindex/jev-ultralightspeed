@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.13.0 (2026-09-20)
+
+The 30,000 judgement benchmark was rerun with the arms alternating instead of one after the other.
+The headline changes, and so does what kind of claim it is.
+
+### Changed
+- **The headline is 32x, and it is arithmetic.** A ceiling counted in requests does not care what a
+  request contains, so 32 items on one beats 1 item on one by 32. The unpacked arm proves the model
+  rather than the claim: 30,000 requests in 1,801 seconds is **999 a minute against a ceiling of
+  1,000**, and 16.67 items a second to three figures.
+- **Both earlier numbers are withdrawn, and they were wrong in opposite directions.**
+  - **26.5x** came from running the arms one after the other. The unpacked arm needs half an hour, so
+    the packed arm always went second, into a service that had been hammered for thirty minutes. It
+    took **245 retries against the other's 1**, and the waiting cost it 17% of its rate. Alternating
+    the turns took the retries to **zero** and the shortfall with them, which finally settles what
+    those 245 were: going second.
+  - **43.9x** came from that same rerun and is just as wrong. Sharing one ceiling let the packed arm
+    use headroom the other was not touching while it waited its turn, so it ran at **1,372 requests a
+    minute** and 730 items a second, which nothing can sustain. Alone at the ceiling it does 532.
+- **The accuracy is the measured half and it got tighter.** Packed minus one-per-request is **+0.01
+  points, 95% −0.72 to +0.75**, against −0.09 and −0.83 to +0.61 before, with both arms on 89.2%.
+- The cost is unchanged and was never in doubt: **$0.430 against $0.729, 41% less**, because tokens do
+  not care what time it is.
+- `bench_eval.py` reports the arithmetic ratio as the claim and the measured rates as diagnostics,
+  and says when an arm went over its share of a shared ceiling.
+
+### Notes
+The pacing knob was kept partly because those 245 retries were unexplained. They are explained now, so
+the only argument left for `paced=True` is that somebody on a stricter allocation may meet a throttle
+this account does not. The README says so.
+
+`docs/infographic.png` still shows 26.5x, 441 items/s, 68 seconds, 89.3% and 245 retried. It needs
+regenerating and cannot be regenerated from here.
+
+117 tests, no key and no network needed.
+
 ## v0.12.0 (2026-09-20)
 
 The headline benchmark had a confound, and every benchmark written since found it by not having one.
