@@ -604,7 +604,14 @@ positive one.
 
 **Asking the same item six times buys nothing.** Majority of six: 89.5%. A single ask: 89.7%. Six
 times the tokens for a fifth of a point in the wrong direction. Self-consistency voting is the first
-thing anyone reaches for and on this task it is a waste, which is worth knowing before you pay for it.
+thing anyone reaches for, and here it is a waste.
+
+That one has a reason behind it rather than being a lone number, which is why it is likely to hold on
+your data too. Voting removes variance, and there was almost none to remove: the same completion asked
+twenty-two times comes back the same way 98.1% of the time packed and 99.6% unpacked. A judge that
+already agrees with itself has nothing to average out. LangChain measured the same fact from another
+angle, putting Jev's score variance 92 to 913 times below GPT-5.6 and Claude Sonnet 4.6 as judges.
+Where voting earns its keep is where a judge is unstable, and this one is not.
 
 **Disagreeing with itself is a signal even though voting is not.** The 1,256 completions it answered
 the same way all six times: 92.7%. The 91 where it wavered: 43.4%. So the wavering identifies the hard
