@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jev-ultralightspeed"
+version = "0.1.0"
+description = "Classify a pile of items with TypeSafe's Jev at 47x the throughput of the obvious loop, for a third of the tokens."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Alex Kwon", email = "ask@collapseindex.org" }]
+keywords = ["jev", "typesafe", "llm", "classification", "throughput", "batching"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/collapseindex/jev-ultralightspeed"
+Source = "https://github.com/collapseindex/jev-ultralightspeed"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
