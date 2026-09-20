@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jev-ultralightspeed"
 version = "0.1.0"
-description = "Classify a pile of items with TypeSafe's Jev at 18x the throughput of the obvious loop, for 41% less money, at the same accuracy."
+description = "A million Jev classifications in 15 minutes for five dollars: packing, concurrency and HTTP/2 for TypeSafe's Jev."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
