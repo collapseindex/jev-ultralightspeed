@@ -211,6 +211,38 @@ the order you passed the items in, however the requests were shuffled to get the
 | `model` | `jev-latest` | passed straight through. |
 | `url` | the Jev endpoint | point it at a gateway or a mock. |
 
+### Resuming a job that dies
+
+A million rows take a quarter of an hour and thirty thousand requests. Something will eventually
+kill one of those runs at row 800,000, and paying for those 800,000 answers twice is the expensive
+kind of mistake. Pass a `checkpoint` and it cannot happen:
+
+```python
+for answer in client.stream(rows, question, checkpoint="run.jsonl"):
+    writer.writerow([answer.item, answer.label, answer.p])
+```
+
+Every answer is appended to that file as its request lands. Run the same call again after a crash, a
+kill or a laptop lid, and anything already in the file is not asked again: `client.usage.resumed`
+says how many came back off disk. It is plain JSON lines, so `wc -l` tells you where you are.
+
+It is keyed by exactly what the answer depends on, which is the model, the question, the criteria
+and the item text. Change any of them and the item is asked again, because the old answer is an
+answer to a different question. Measured on a checkpoint of a million answers:
+
+| | |
+| --- | ---: |
+| file | 119 MB |
+| replayed on startup | 1,000,000 answers in **5.0s** |
+| index held in memory | 123 MB |
+| written | about 95,000 answers a second |
+
+Writing is roughly two hundred times faster than the API can answer, so the sidecar is never the
+thing slowing you down. The index holds a 128-bit digest and a file offset per answer and never the
+item text, which is what keeps a million rows inside a laptop: the answer itself is read back off
+disk when it is wanted. A hard kill can lose the last couple of hundred answers still in the write
+buffer, and a torn final line is repaired on the next open.
+
 ## What it does not do
 
 - **It does not change your question.** The only difference between a packed question and a single
@@ -221,22 +253,23 @@ the order you passed the items in, however the requests were shuffled to get the
   context, so a hostile item can try to talk about the others: "ignore the rest and answer yes".
   Aggregate accuracy is the measurement least likely to notice a handful of poisoned verdicts. Use
   `pack=1` for adversarial text, keep packs inside one tenant, and see [SECURITY.md](SECURITY.md).
-- **It does not cache across processes.** The cache lives in the client, in memory, bounded at
-  10,000 entries.
+- **It does not cache across processes unless you ask it to.** The cache lives in the client, in
+  memory, bounded at 10,000 entries. A `checkpoint` is the durable version of it, and the two share
+  a key.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529, with jitter and the
   server's own `Retry-After` when it sends one; anything else is raised with what the API said. A
   run that fails five times is abandoned rather than sending the rest: a wrong key over 200 items
   sends 12 requests on the fast path and 9 on the threaded one, counted by a test against a local
-  server that refuses everything, rather than estimated. Work already finished is kept: `stream()` yields each chunk
-  as it completes, and after a failed call `client.last_partial` holds the payloads that did
-  arrive.
+  server that refuses everything, rather than estimated. Work already finished is kept: `stream()`
+  yields each chunk as it completes, after a failed call `client.last_partial` holds the answers
+  that did arrive on either transport, and with a `checkpoint` they are already on disk.
 - **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
 
 ## Development
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 43 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 52 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents

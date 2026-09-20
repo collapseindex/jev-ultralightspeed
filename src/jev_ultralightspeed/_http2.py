@@ -172,12 +172,18 @@ class Pipe:
             await asyncio.sleep(wait)               # the slot is free while this waits
         raise JevError("out of retries")
 
-    async def _all(self, bodies, on_request, on_timing, on_retry, on_failure, on_done) -> list[dict]:
+    async def _all(self, bodies, on_request, on_timing, on_retry, on_done) -> list[dict]:
         """
         Every request runs to its own end rather than being cancelled by a
         sibling, but a run that is plainly doomed is abandoned early: a wrong
         key would otherwise send every request, be refused by every one of
         them, and take half an hour to say so.
+
+        `on_done(index, payload)` is called the moment a request lands, on this
+        loop's thread. It is what makes progress live, a checkpoint durable and
+        a half-finished run recoverable, so the caller reads each payload there
+        and this returns them only for the ordinary case. An exception from it
+        fails that request, exactly as a bad payload would on the threaded path.
         """
         run = _Run()                    # per call, so two callers cannot stomp each other
 
@@ -185,7 +191,7 @@ class Pipe:
             try:
                 answer = await self._one(body, run, on_request, on_timing, on_retry)
                 if on_done:
-                    on_done(index)          # while the rest are still in flight
+                    on_done(index, answer)  # while the rest are still in flight
                 return answer
             except Exception as error:
                 run.failures += 1
@@ -195,21 +201,17 @@ class Pipe:
 
         answers = await asyncio.gather(*(one(index, body) for index, body in enumerate(bodies)),
                                        return_exceptions=True)
-        arrived = [(index, answer) for index, answer in enumerate(answers)
-                   if not isinstance(answer, BaseException)]
         for answer in answers:
             if isinstance(answer, BaseException):
-                if on_failure:
-                    on_failure(arrived)      # with their indices, so they can be placed
-                raise answer
+                raise answer                 # what did land is already with the caller
         return list(answers)
 
     # -- from ordinary code ------------------------------------------------
     def ask_all(self, bodies: Sequence[dict], *, on_request: Callable | None = None,
                 on_timing: Callable | None = None, on_retry: Callable | None = None,
-                on_failure: Callable | None = None, on_done: Callable | None = None) -> list[dict]:
+                on_done: Callable | None = None) -> list[dict]:
         future = asyncio.run_coroutine_threadsafe(
-            self._all(bodies, on_request, on_timing, on_retry, on_failure, on_done), self._loop)
+            self._all(bodies, on_request, on_timing, on_retry, on_done), self._loop)
         return future.result()
 
     def warm(self) -> None:

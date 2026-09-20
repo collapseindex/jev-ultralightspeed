@@ -37,8 +37,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 from . import _http2
+from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -90,6 +91,7 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached: int = 0
+    resumed: int = 0             # answered by a checkpoint from an earlier run
     seconds: float = 0.0
 
     USD_PER_MILLION_INPUT = 0.042        # TypeSafe's published price
@@ -108,6 +110,7 @@ class Usage:
 
     def __str__(self) -> str:
         retried = f", {self.retries} retried" if self.retries else ""
+        retried += f", {self.resumed} resumed" if self.resumed else ""
         return (f"{self.items} items in {self.seconds:.2f}s "
                 f"({self.items_per_second:.1f}/s, {self.requests} requests{retried}, "
                 f"{self.tokens_per_item:.0f} tokens/item, ${self.usd:.5f})")
@@ -174,6 +177,7 @@ class Client:
         self._local = threading.local()
         self._pipe = None
         self._pool: ThreadPoolExecutor | None = None
+        self._ledgers: dict[str, Ledger] = {}
         self._books = threading.Lock()
         self.last_partial: list = []       # payloads that arrived before a failed run gave up
         self.latencies: list[float] = []
@@ -296,7 +300,10 @@ class Client:
         self.close()
 
     def close(self) -> None:
-        """Let go of every connection this client opened."""
+        """Let go of every connection this client opened, and every file."""
+        for ledger in self._ledgers.values():
+            ledger.close()
+        self._ledgers.clear()
         self._drop_connection()
         if self._pool is not None:
             self._pool.shutdown(wait=True)
@@ -313,6 +320,7 @@ class Client:
         criteria: dict | None = None,
         options: dict | None = None,
         chunk: int = 5_000,
+        checkpoint: str | os.PathLike | None = None,
     ):
         """
         The same work, a chunk at a time, so a million rows cost the memory
@@ -326,15 +334,21 @@ class Client:
 
         The items are taken from any iterable, so they can come off a cursor
         or a file without being read into a list first.
+
+        With `checkpoint` set, every answer is appended to that file as its
+        request lands and a rerun skips whatever is already in it, which is how
+        a job of a million rows survives being killed at row 800,000.
         """
         batch: list[str] = []
         for item in items:
             batch.append(item)
             if len(batch) >= chunk:
-                yield from self.classify(batch, instructions, criteria=criteria, options=options)
+                yield from self.classify(batch, instructions, criteria=criteria,
+                                         options=options, checkpoint=checkpoint)
                 batch = []
         if batch:
-            yield from self.classify(batch, instructions, criteria=criteria, options=options)
+            yield from self.classify(batch, instructions, criteria=criteria,
+                                     options=options, checkpoint=checkpoint)
 
     def classify(
         self,
@@ -344,6 +358,7 @@ class Client:
         criteria: dict | None = None,
         options: dict | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        checkpoint: str | os.PathLike | None = None,
     ) -> list[Answer]:
         """
         Answer one question about every item, in order.
@@ -354,6 +369,11 @@ class Client:
         `on_progress(done, total)` is called as each request lands, which on the
         fast transport means from a background thread. Keep it cheap, and lock
         anything it touches.
+
+        `checkpoint` is a file of answers that survives the process. Anything
+        already in it is not asked again, and every new answer is appended as
+        its request lands, so the same call run twice costs nothing the second
+        time and a killed run resumes where it stopped.
         """
         texts = [_clean(item, index) for index, item in enumerate(items)]
         if not texts:
@@ -361,12 +381,22 @@ class Client:
 
         answers: list[Answer | None] = [None] * len(texts)
         self.last_partial = []
+        ledger = self._ledger_for(checkpoint)
         todo: list[int] = []
         for index, text in enumerate(texts):
             hit = self._cached(text, instructions, criteria, options)
             if hit is not None:
                 answers[index] = _copy_answer(hit, text)
                 self.usage.cached += 1
+                continue
+            stored = (ledger.answer_for(self._key(text, instructions, criteria, options), text)
+                      if ledger is not None else None)
+            if stored is not None:
+                answers[index] = Answer(item=text, p=stored.p, label=stored.label,
+                                        kind=stored.kind, distribution=dict(stored.distribution),
+                                        confidence=stored.confidence,
+                                        position=stored.position, packed=stored.packed)
+                self.usage.resumed += 1
             else:
                 todo.append(index)
 
@@ -392,36 +422,39 @@ class Client:
             bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
                       for g in groups]
 
-            def group_answers(which: int, data: dict) -> list[Answer]:
-                group = groups[which]
-                return [_read(self._entry(data, position), texts[index], position, len(group))
-                        for position, index in enumerate(group, start=1)]
+            landed: dict[int, list[Answer]] = {}
 
-            def finished(which: int) -> None:
-                # Called from the loop thread as each request lands, so progress
-                # arrives while the work does rather than all at the end.
+            def finished(which: int, data: dict) -> None:
+                # On the loop thread, the moment the request lands: progress goes
+                # out while the rest are still in flight, the checkpoint is
+                # written before anything can kill the run, and the payload is
+                # read once rather than again at the end.
                 nonlocal done
-                done += len(groups[which])
+                group = groups[which]
+                here = [_read(self._entry(data, position), texts[index], position, len(group))
+                        for position, index in enumerate(group, start=1)]
+                if ledger is not None:
+                    for index, answer in zip(group, here):
+                        ledger.record(self._key(texts[index], instructions, criteria, options),
+                                      answer)
+                landed[which] = here
+                done += len(here)
                 if on_progress:
                     on_progress(done, len(unique))
 
-            def salvage(arrived) -> None:
-                # What survived a failed run, as answers against their own items.
-                # A malformed payload here must not replace the error already on
-                # its way up, so an unreadable group is dropped instead.
-                kept: list[Answer] = []
-                for which, data in arrived:
-                    try:
-                        kept.extend(group_answers(which, data))
-                    except (JevError, KeyError, TypeError, ValueError):
-                        continue
-                self.last_partial = kept
-
-            payloads = self._pipe_for().ask_all(
-                bodies, on_request=self._count, on_timing=self._note_latency,
-                on_retry=self._count_retry, on_failure=salvage, on_done=finished)
-            for which, data in enumerate(payloads):
-                for index, answer in zip(groups[which], group_answers(which, data)):
+            try:
+                self._pipe_for().ask_all(
+                    bodies, on_request=self._count, on_timing=self._note_latency,
+                    on_retry=self._count_retry, on_done=finished)
+            except JevError:
+                # Whatever did land is already read, in order, and on disk if a
+                # checkpoint was given. Hand it over before raising.
+                self.last_partial = [answer for which in sorted(landed) for answer in landed[which]]
+                if ledger is not None:
+                    ledger.flush()
+                raise
+            for which in sorted(landed):
+                for index, answer in zip(groups[which], landed[which]):
                     answers[index] = answer
                     self._remember(texts[index], instructions, criteria, options, answer)
         elif groups:
@@ -433,6 +466,9 @@ class Client:
                 for index, answer in zip(group, result):
                     answers[index] = answer
                     self.last_partial.append(answer)      # kept if a later group fails
+                    if ledger is not None:
+                        ledger.record(self._key(texts[index], instructions, criteria, options),
+                                      answer)
                     self._remember(texts[index], instructions, criteria, options, answer)
                 done += len(group)
                 if on_progress:
@@ -444,6 +480,8 @@ class Client:
         if missing:
             raise JevError(f"{len(missing)} of {len(texts)} items came back without an answer; "
                            f"the first is item {missing[0] + 1}")
+        if ledger is not None:
+            ledger.flush()
         self.usage.items += len(texts)
         self.usage.seconds += time.monotonic() - started
         return answers
@@ -481,6 +519,18 @@ class Client:
             self.latencies.append(milliseconds)
             if len(self.latencies) > MAX_LATENCIES:
                 del self.latencies[:len(self.latencies) - MAX_LATENCIES]
+
+    def _ledger_for(self, checkpoint) -> Ledger | None:
+        """
+        The sidecar for this path, opened once. A chunked stream calls
+        `classify` many times and must not read the index on each of them.
+        """
+        if checkpoint is None:
+            return None
+        path = os.fspath(checkpoint)
+        if path not in self._ledgers:
+            self._ledgers[path] = Ledger(path, self.model)
+        return self._ledgers[path]
 
     def _count_retry(self) -> None:
         with self._books:

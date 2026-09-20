@@ -77,6 +77,9 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--chunk", type=int, default=5_000)
     parser.add_argument("--out", default="")
+    parser.add_argument("--checkpoint", default="",
+                        help="append answers here and skip what is already in it; "
+                             "kill this run and start it again to see it work")
     arguments = parser.parse_args()
 
     client = Client(pack=arguments.pack, workers=arguments.workers, cache=False)
@@ -96,7 +99,8 @@ def main() -> int:
     done = 0
     try:
         for answer in client.stream(queue(arguments.items), QUESTION,
-                                    criteria=CRITERIA, chunk=arguments.chunk):
+                                    criteria=CRITERIA, chunk=arguments.chunk,
+                                    checkpoint=arguments.checkpoint or None):
             counts[answer.label] += 1
             done += 1
             if writer:

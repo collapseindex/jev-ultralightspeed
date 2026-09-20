@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.4.0 (2026-09-20)
+
+The README has said "for when the question already works and there are a million rows waiting" since
+the first release, and until now a job of a million rows that died at row 800,000 lost everything.
+
+### Added
+- **`checkpoint`, on `classify()` and `stream()`.** An append-only JSON lines sidecar. Every answer
+  is written as its request lands, and a rerun of the same call skips whatever is already in the
+  file, so a killed run resumes instead of starting over. `usage.resumed` counts what came back off
+  disk. It is keyed by what the answer actually depends on, which is the model, question, criteria
+  and item text, so changing any of them asks again.
+
+  Measured on a checkpoint of a million answers: a 119 MB file, replayed on startup in **5.0
+  seconds**, holding a **123 MB** index, written at about **95,000 answers a second**, which is
+  roughly two hundred times faster than the API can answer. The index holds a 128-bit digest and a
+  file offset per answer and never the item text, so a million rows fit on a laptop; the answer
+  itself is read back off disk when it is wanted. A hard kill loses at most the couple of hundred
+  answers still in the write buffer, and a torn last line is repaired on the next open.
+- `soak.py --checkpoint`, which is the script the feature exists for. Kill it and run it again.
+
+### Changed
+- The fast path reads each payload on the thread it lands on, once, rather than again at the end of
+  the run. That is what lets a checkpoint be durable before the run can die, and it is also why
+  `_http2.Pipe` no longer needs an `on_failure` hook: whatever landed is already with the caller.
+  Internal, but it is a smaller interface than v0.3.2 shipped.
+- `last_partial` is `list[Answer]` on both transports, which v0.3.2 fixed, and with a checkpoint it
+  is on disk as well as in memory.
+
+### Fixed
+- A checkpoint line torn mid-digest by a hard kill produced a short key that looked like a perfectly
+  good one for an item nobody had asked about. Found by its own test.
+
+52 tests, still no key and no network needed.
+
 ## v0.3.2 (2026-09-20)
 
 Both fixes here are the same shape as the last release's: something that worked on the threaded

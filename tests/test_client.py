@@ -584,3 +584,144 @@ def test_turning_off_dedupe_also_turns_off_the_cache():
     sent = sum(len(body["state"]) for body in client.sent)
     assert sent == 12, f"only {sent} of 12 repeats were actually asked"
     assert client.usage.cached == 0
+
+
+# -- the checkpoint sidecar -------------------------------------------------
+
+def records_in(path):
+    """Every record line, the header not counted."""
+    return [line for line in Path(path).read_text(encoding="utf-8").splitlines()[1:] if line]
+
+
+@both_transports
+def test_a_killed_run_resumes_where_it_stopped(transport, tmp_path):
+    """
+    The point of the whole thing: a run that dies does not have to be paid for
+    twice. The second server's count is the test.
+    """
+    book = tmp_path / "run.jsonl"
+    dying = Answering(fail_after=6)
+    client = a_real_client(dying.url, transport, pack=1, workers=4)
+    items = [f"item {n}" for n in range(60)]
+    try:
+        with pytest.raises(JevError):
+            client.classify(items, QUESTION, checkpoint=book)
+    finally:
+        client.close()
+        dying.close()
+
+    saved = len(records_in(book))
+    assert 0 < saved < 60, f"{saved} answers were kept from a run that half worked"
+
+    healthy = Answering()
+    second = a_real_client(healthy.url, transport, pack=1, workers=4)
+    try:
+        answers = second.classify(items, QUESTION, checkpoint=book)
+    finally:
+        second.close()
+        healthy.close()
+
+    assert len(answers) == 60
+    assert [a.item for a in answers] == items
+    assert healthy.seen == 60 - saved, "the second run paid for work the first had already done"
+    assert second.usage.resumed == saved
+
+
+@both_transports
+def test_a_finished_run_repeated_costs_nothing(transport, tmp_path):
+    book = tmp_path / "run.jsonl"
+    server = Answering()
+    items = [f"item {n}" for n in range(12)]
+    first, second = [], []
+    for landing in (first, second):
+        client = a_real_client(server.url, transport, pack=4, workers=2)
+        try:
+            landing.extend(client.classify(items, QUESTION, checkpoint=book))
+        finally:
+            client.close()
+    asked = server.seen
+    server.close()
+
+    assert asked == 3, f"{asked} requests for a job that was already done"
+    assert [(a.item, a.label, a.p) for a in first] == [(a.item, a.label, a.p) for a in second]
+    assert len(records_in(book)) == 12
+
+
+def test_a_checkpoint_is_per_question(tmp_path):
+    """Same text, different question, is a different answer and must be asked."""
+    book = tmp_path / "run.jsonl"
+    server = Answering()
+    for question in (QUESTION, "Is this spam?"):
+        client = a_real_client(server.url, "threads", pack=1, workers=1)
+        try:
+            client.classify(["one text"], question, checkpoint=book)
+        finally:
+            client.close()
+    asked = server.seen
+    server.close()
+    assert asked == 2, "a checkpoint answered a question it had never been asked"
+
+
+def test_a_stream_keeps_one_checkpoint_across_its_chunks(tmp_path):
+    book = tmp_path / "run.jsonl"
+    server = Answering()
+    client = a_real_client(server.url, "threads", pack=2, workers=2)
+    try:
+        answers = list(client.stream(iter(f"item {n}" for n in range(10)), QUESTION,
+                                     chunk=4, checkpoint=book))
+        assert len(client._ledgers) == 1, "the index was reread at every chunk boundary"
+    finally:
+        client.close()
+    server.close()
+    assert [a.item for a in answers] == [f"item {n}" for n in range(10)]
+    assert len(records_in(book)) == 10
+
+
+def test_a_half_written_last_line_is_survivable(tmp_path):
+    """A hard kill can tear the line it was writing. The rest still counts."""
+    book = tmp_path / "run.jsonl"
+    server = Answering()
+    client = a_real_client(server.url, "threads", pack=1, workers=1)
+    try:
+        client.classify([f"item {n}" for n in range(4)], QUESTION, checkpoint=book)
+    finally:
+        client.close()
+
+    text = book.read_text(encoding="utf-8")
+    book.write_text(text + '{"k":"deadbe', encoding="utf-8")   # torn mid-record
+
+    second = a_real_client(server.url, "threads", pack=1, workers=1)
+    try:
+        answers = second.classify([f"item {n}" for n in range(4)], QUESTION, checkpoint=book)
+    finally:
+        second.close()
+    asked = server.seen
+    server.close()
+    assert asked == 4, "a torn line cost the whole file"
+    assert len(answers) == 4
+    assert second.usage.resumed == 4
+
+
+def test_pointing_a_checkpoint_at_the_wrong_file_is_refused(tmp_path):
+    """Appending answers to somebody's data file is worse than failing."""
+    from jev_ultralightspeed._ledger import NotACheckpoint
+
+    other = tmp_path / "important.jsonl"
+    other.write_text('{"id": 1, "text": "not ours"}\n', encoding="utf-8")
+    client = Client(key="test-key", transport="threads")
+    try:
+        with pytest.raises(NotACheckpoint):
+            client.classify(["one"], QUESTION, checkpoint=other)
+    finally:
+        client.close()
+
+
+def test_the_digest_reads_a_record_without_parsing_it():
+    """The fast path through a million lines, and its fallback."""
+    from jev_ultralightspeed import _ledger
+
+    line = b'{"k":"' + b"ab" * 16 + b'","p":0.9,"l":"yes"}\n'
+    assert _ledger._key_in(line) == bytes.fromhex("ab" * 16)
+    assert _ledger._key_in(b'{"p":0.9,"k":"' + b"cd" * 16 + b'"}\n') == bytes.fromhex("cd" * 16)
+    assert _ledger._key_in(b'{"k":"deadbe') is None
+    assert _ledger._key_in(b"\n") is None
