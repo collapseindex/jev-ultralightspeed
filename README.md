@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.1.0** · Apache-2.0 · no required dependencies
+**v0.1.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Faster, cheaper, same accuracy: hundreds of items a second against dozens, with agreement against human labels unchanged" width="100%" />
 

@@ -17,6 +17,7 @@ them per call costs more than the multiplexing saves.
 from __future__ import annotations
 
 import asyncio
+import ssl
 import threading
 import time
 from typing import Callable, Sequence
@@ -72,8 +73,13 @@ class Pipe:
         asyncio.set_event_loop(self._loop)
         limits = httpx.Limits(max_connections=self.inflight,
                               max_keepalive_connections=self.inflight)
+        # Trust the same certificates the standard library does, which means the
+        # operating system's store. httpx would otherwise trust only certifi's
+        # bundle, and fail on any machine whose TLS is inspected by a proxy or
+        # an antivirus whose root lives in the OS store.
         self._client = httpx.AsyncClient(http2=True, timeout=self.timeout, limits=limits,
-                                         headers=self._headers)
+                                         headers=self._headers,
+                                         verify=ssl.create_default_context())
         self._gate = asyncio.Semaphore(self.inflight)
         self._ready.set()
         self._loop.run_forever()

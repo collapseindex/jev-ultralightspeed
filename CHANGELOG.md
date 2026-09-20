@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.1 (2026-09-20)
+
+### Fixed
+- The HTTP/2 transport now trusts the operating system's certificate store, the same one the
+  standard library path uses. It trusted only certifi's bundle before, so on any machine whose TLS
+  is inspected by a proxy or an antivirus with a root in the OS store, `[fast]` failed to connect
+  while the plain install worked. Found by installing the published package into a clean
+  environment and using it.
+
 ## v0.1.0 (2026-09-20)
 
 On PyPI: `pip install "jev-ultralightspeed[fast]"`

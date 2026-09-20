@@ -38,7 +38,7 @@ from typing import Callable, Iterable, Sequence
 
 from . import _http2
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
