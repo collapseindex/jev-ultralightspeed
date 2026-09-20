@@ -39,7 +39,7 @@ from typing import Callable, Iterable, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -83,7 +83,11 @@ class Answer:
     """One item's answer: the probability, and what it works out to."""
 
     item: str
-    p: float                      # probability of true, for a yes/no question
+    # The judge's own probability for the answer it gave. It ranks well and it is
+    # not a probability of being right: measured against human labels it runs
+    # about 4 points over in the middle of the range. Sort by it, do not read it
+    # as a percentage. See `triage`.
+    p: float
     label: str                    # "yes" or "no", or the chosen option
     kind: str = "noul"
     distribution: dict = field(default_factory=dict)
@@ -871,6 +875,50 @@ def _packed_body(model, texts: Sequence[str], instructions, criteria, options,
                 f"{instructions} Judge {name} only, ignoring every other item.",
                 criteria, options)
     return {"model": model, "state": state, "questions": questions}
+
+
+def triage(answers: Sequence[Answer], *, keep: float | None = None,
+           at_least: float | None = None) -> tuple[list[Answer], list[Answer]]:
+    """
+    Split answers into the ones worth trusting and the ones worth a look.
+
+    Say either how much to keep or where to cut:
+
+        trusted, review = triage(answers, keep=0.8)
+        trusted, review = triage(answers, at_least=0.92)
+
+    This is the one lever that moves agreement, and it moves it a long way. On
+    the 1,347 human-labelled completions in dinostomp's `xstest-refusal` pod,
+    with the cut chosen on one half and measured on the other:
+
+        keep 100%   89.7%
+        keep  89%   94.4%
+        keep  81%   96.8%
+        keep  72%   98.5%
+
+    The two annotators who labelled that pod agreed with each other 97.3% of the
+    time, so the fifth it is least sure about is carrying most of the difference
+    between this judge and a person. Both lists keep the order they came in, and
+    a skipped answer is always one to look at.
+
+    Where to cut is a property of your question and your items, not of this
+    library, so measure it on a few hundred labelled rows of your own.
+    `bench_confidence.py` is that measurement.
+    """
+    if (keep is None) == (at_least is None):
+        raise JevError("say one of keep or at_least, not both and not neither")
+    if keep is not None:
+        if not 0.0 <= keep <= 1.0:
+            raise JevError("keep is a fraction between 0 and 1")
+        sure = [answer for answer in answers if answer.ok]
+        wanted = int(len(sure) * keep)
+        if wanted <= 0:
+            at_least = 1.1                       # trust nothing
+        else:
+            at_least = sorted((answer.p for answer in sure), reverse=True)[wanted - 1]
+    trusted = [a for a in answers if a.ok and a.p >= at_least]
+    review = [a for a in answers if not (a.ok and a.p >= at_least)]
+    return trusted, review
 
 
 def _copy_answer(answer: "Answer", text: str) -> "Answer":

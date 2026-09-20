@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.9.0 (2026-09-20)
+
+Throughput is within a fifth of its arithmetic ceiling, so this release is about the other gap.
+Agreement with human labels is **eight points** below the humans' agreement with each other, 89.3%
+against 97.3%, and that turns out to be mostly recoverable without asking Jev anything different.
+
+### Added
+- **`triage(answers, keep=0.8)`**, or `at_least=0.92`. Splits answers into the ones worth trusting and
+  the ones worth a look, by the judge's own probability. 8,082 judgements over the 1,347 completions in
+  `xstest-refusal`, with the cut chosen on one half of the completions and measured on the other:
+
+  | kept | cut at | agreement |
+  | ---: | ---: | ---: |
+  | 100% | | 89.7% |
+  | 89% | 0.770 | 94.4% |
+  | **81%** | **0.920** | **96.8%** |
+  | 72% | 0.970 | 98.5% |
+  | 62% | 0.990 | 99.3% |
+
+  Set aside the fifth it is least sure about and the rest is at the annotators' own agreement rate.
+  Not the same measurement on the same set, so it reads as "at the ceiling on the part it is sure
+  about" rather than "as good as a person", and the README says so. A skipped answer is always one to
+  look at, and both lists keep their input order.
+- **`bench_confidence.py`**, which collects for about 12 cents and then lets the analysis be argued
+  with for free: every judgement is written to `data/results/` so a threshold can be re-cut without
+  paying again. It reports risk and coverage both in-sample and held out, calibration, unanimity,
+  voting, position, and the split by whether the two annotators agreed with each other.
+
+### Measured, including two negative results
+- **Asking the same item six times buys nothing.** Majority of six 89.5%, a single ask 89.7%. Six
+  times the tokens for a fifth of a point in the wrong direction. Self-consistency voting is the first
+  thing anyone reaches for on a task like this, and here it is a waste.
+- **Wavering is a signal even though voting is not.** The 1,256 completions answered the same way all
+  six times: 92.7%. The 91 where it did not: 43.4%.
+- **`p` ranks but is not a chance of being right.** Where it said 74.8% it was right 51.0% of the time;
+  where it said 92.3%, 78.4%. Weighted across the bands the gap averages 4.4 points. The docstring on
+  `Answer.p` now says to sort by it and not to read it as a percentage.
+- **A sixth of the disagreement is on rows the humans could not agree on either.** 90.9% where both
+  annotators agreed, 34.2% on the 37 where they did not, and those 37 carry 17% of all the
+  disagreement while being 2.7% of the items.
+- **Position in a shuffled packed request costs 1.0 point of spread**, no trend: 89.7%, 88.9%, 88.9%,
+  89.9% across items 1-8, 9-16, 17-24, 25-32. The 3.3 point spread published earlier is the
+  sorted-queue case, which remains the one to avoid.
+
+94 tests, no key and no network needed.
+
 ## v0.8.0 (2026-09-20)
 
 Two things that were named in the README as known shortcomings and are now done: the question is no

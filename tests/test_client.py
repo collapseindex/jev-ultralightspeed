@@ -1327,3 +1327,79 @@ def test_the_stream_reports_progress_too():
         server.close()
     assert seen, "a stream never said how far along it was"
     assert seen[-1][0] == seen[-1][1]
+
+
+# -- which verdicts to trust ------------------------------------------------
+
+def make_answers(probabilities, *, bad=()):
+    from jev_ultralightspeed import Answer
+
+    answers = []
+    for index, p in enumerate(probabilities):
+        if index in bad:
+            answers.append(Answer(item=f"item {index}", p=0.0, label="", kind="error",
+                                  error="unreadable"))
+        else:
+            answers.append(Answer(item=f"item {index}", p=p,
+                                  label="yes" if p >= 0.5 else "no"))
+    return answers
+
+
+def test_triage_keeps_the_share_you_asked_for():
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.99, 0.55, 0.97, 0.60, 0.95, 0.51, 0.93, 0.80, 0.91, 0.70])
+    trusted, review = triage(answers, keep=0.8)
+    assert len(trusted) == 8
+    assert len(review) == 2
+    assert {a.item for a in review} == {"item 1", "item 5"}, [a.item for a in review]
+    assert [a.item for a in trusted] == [a.item for a in answers if a not in review]
+
+
+def test_triage_takes_a_threshold_instead():
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.99, 0.55, 0.91, 0.93])
+    trusted, review = triage(answers, at_least=0.92)
+    assert [a.item for a in trusted] == ["item 0", "item 3"]
+    assert [a.item for a in review] == ["item 1", "item 2"]
+
+
+def test_a_skipped_answer_is_always_one_to_look_at():
+    """It has no probability to be confident about."""
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.99, 0.99, 0.99, 0.99], bad=(2,))
+    trusted, review = triage(answers, keep=1.0)
+    assert [a.item for a in review] == ["item 2"]
+    assert len(trusted) == 3
+
+
+def test_triage_wants_exactly_one_way_of_saying_it():
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.9])
+    with pytest.raises(JevError):
+        triage(answers, keep=0.5, at_least=0.5)
+    with pytest.raises(JevError):
+        triage(answers)
+    with pytest.raises(JevError):
+        triage(answers, keep=1.5)
+
+
+def test_triage_keeps_the_order_it_was_given():
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.2, 0.99, 0.3, 0.98, 0.4])
+    trusted, review = triage(answers, keep=0.4)
+    assert [a.item for a in trusted] == ["item 1", "item 3"]
+    assert [a.item for a in review] == ["item 0", "item 2", "item 4"]
+
+
+def test_keeping_nothing_trusts_nothing():
+    from jev_ultralightspeed import triage
+
+    answers = make_answers([0.99, 1.0])
+    trusted, review = triage(answers, keep=0.0)
+    assert trusted == []
+    assert len(review) == 2

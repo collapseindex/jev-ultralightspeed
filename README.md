@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.8.0** · Apache-2.0 · no required dependencies
+**v0.9.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -237,6 +237,10 @@ answers = classify(tickets, "Which team should handle this?", options={
 Every answer carries `item`, `label`, `p`, `distribution`, `confidence` and `kind`, and comes back in
 the order you passed the items in, however the requests were shuffled to get there.
 
+`p` is the lever that matters most. Sorting by it and setting aside the fifth the judge is least sure
+about takes agreement with human labels from 89.7% to **96.8%**, which is the annotators' own
+agreement rate. See [Knowing which verdicts to trust](#knowing-which-verdicts-to-trust).
+
 ### Knobs
 
 | argument | default | what it does |
@@ -264,6 +268,82 @@ plus the longest question, and `pack` counts items, so several individually lega
 illegal request. Groups are split to stay well under both limits, estimated at a deliberately
 pessimistic 3.5 characters per token against 3.92 measured on a live packed request. Short items are
 unaffected and still pack to `pack`.
+
+### Knowing which verdicts to trust
+
+Throughput is within a fifth of its arithmetic ceiling. Agreement is **eight points** below the human
+one, 89.3% against annotators who agreed with each other 97.3% of the time, so that is the bigger gap
+by a lot. The useful thing is not that the judge is 89% right. It is that the judge's own probability
+says which 89%.
+
+```python
+from jev_ultralightspeed import classify, triage
+
+answers = classify(rows, question, options=labels)
+trusted, review = triage(answers, keep=0.8)      # or at_least=0.92
+```
+
+8,082 judgements over the 1,347 human-labelled completions in dinostomp's `xstest-refusal` pod,
+packed 32 deep. The cut is chosen on one half of the completions and measured on the other, because a
+threshold picked on the data it is then scored against is not a finding:
+
+| kept | cut at | agreement |
+| ---: | ---: | ---: |
+| 100% | | 89.7% |
+| 89% | 0.770 | 94.4% |
+| **81%** | **0.920** | **96.8%** |
+| 72% | 0.970 | 98.5% |
+| 62% | 0.990 | 99.3% |
+
+**Set aside the fifth it is least sure about and the rest is at the human ceiling.** Those two figures,
+96.8% and 97.3%, are not the same measurement on the same set, so read it as "at the ceiling on the
+part it is sure about" rather than "as good as a person". What it means in practice is that a million
+rows do not need a million pairs of eyes; they need eyes on about two hundred thousand, and the judge
+picks which.
+
+Four more things fell out of that run, and two of them are negative results worth as much as the
+positive one.
+
+**Asking the same item six times buys nothing.** Majority of six: 89.5%. A single ask: 89.7%. Six
+times the tokens for a fifth of a point in the wrong direction. Self-consistency voting is the first
+thing anyone reaches for and on this task it is a waste, which is worth knowing before you pay for it.
+
+**Disagreeing with itself is a signal even though voting is not.** The 1,256 completions it answered
+the same way all six times: 92.7%. The 91 where it wavered: 43.4%. So the wavering identifies the hard
+ones, it just does not fix them.
+
+**The probability ranks but does not mean what it says.** Against the human labels it runs over in the
+middle of its range: where it said 74.8% it was right 51.0% of the time, where it said 92.3% it was
+right 78.4%. Weighted across the bands the gap averages 4.4 points. Sort by `p`, do not read it as a
+chance of being right. Some of that is definitional, since the model's probability is about its own
+answer and not about agreeing with these two annotators, but the practical advice is the same.
+
+**A sixth of the disagreement is on rows the humans could not agree on either.** Where both annotators
+agreed, 90.9%. On the 37 completions where they did not, 34.2%, and those 37 carry **17% of all the
+disagreement** despite being 2.7% of the items. The remaining gap is smaller than the headline makes
+it look.
+
+And one reassurance: across positions in a shuffled packed request the spread is **1.0 point**
+(89.7%, 88.9%, 88.9%, 89.9% for items 1-8, 9-16, 17-24, 25-32), with no trend. The 3.3 point spread in
+the position table above is the sorted-queue case, which is the one to avoid.
+
+```bash
+TYPESAFE_API_KEY=... python bench_confidence.py     # collects for ~12 cents, then argues for free
+python bench_confidence.py --analyse data/results/<file>
+```
+
+The run behind that table is committed, so the analysis can be re-cut or argued with **with no key
+and no spending**:
+
+```bash
+python bench_confidence.py --analyse data/results/20260920_122545_confidence_jev-latest_1347x6_p32_s7.jsonl
+```
+
+It holds one line per judgement: which completion, the human label, whether the two annotators agreed,
+and what Jev said with what probability. No completion text, so it does not republish the pod.
+
+The threshold itself is a property of your question and your items, not of this library. Measure it on
+a few hundred labelled rows of your own; that is what the collecting half is for.
 
 ### Carrying the question once
 
@@ -394,7 +474,8 @@ must not be quietly skipped a million times. A test holds that line.
   against a local server that refuses everything, rather than estimated. Work already finished is kept: `stream()`
   yields each chunk as it completes, after a failed call `client.last_partial` holds the answers
   that did arrive on either transport, and with a `checkpoint` they are already on disk.
-- **It is not an eval harness.** It makes a judge fast, not trustworthy. See Related below.
+- **It is not an eval harness.** It makes a judge fast, and it will tell you which of its verdicts
+  to distrust, but it does not tell you whether the judge is the right judge. See Related below.
 - **It is not the cheapest way to do a backfill nobody is waiting for.** If TypeSafe offers an
   offline batch endpoint, it will beat everything here on both price and ceiling, because none of
   this can buy a rate limit. This is for work that has to happen now.
@@ -403,7 +484,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 88 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 94 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
