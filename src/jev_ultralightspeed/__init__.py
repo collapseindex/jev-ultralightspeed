@@ -8,9 +8,13 @@ the throughput for a little over a third of the tokens:
 
   pack        several items into one request, one question each
   parallel    several requests in flight, under the published rate limit
+  reuse       one connection, kept open, multiplexed where possible
   dedupe      identical text asked once
 
-Everything here is standard library. Bring your own key.
+The standard library alone gets you a thread per connection on HTTP/1.1. With
+httpx and h2 installed (`pip install "jev-ultralightspeed[fast]"`) every
+request in flight shares one HTTP/2 connection instead, which measured about
+twice as fast. Either way, bring your own key.
 
     from jev_ultralightspeed import classify
 
@@ -31,6 +35,8 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
+
+from . import _http2
 
 __version__ = "0.1.0"
 
@@ -134,6 +140,7 @@ class Client:
         workers: int = WORKERS,
         requests_per_minute: int = REQUESTS_PER_MINUTE,
         cache: bool = True,
+        transport: str = "auto",
     ) -> None:
         self.key = key or os.environ.get("TYPESAFE_API_KEY", "")
         if not self.key:
@@ -143,8 +150,17 @@ class Client:
         self.pack = max(1, pack)
         self.workers = max(1, workers)
         self.cache_on = cache
+        if transport not in ("auto", "http2", "threads"):
+            raise JevError('transport must be "auto", "http2" or "threads"')
+        if transport == "http2" and not _http2.available():
+            raise JevError('transport="http2" needs httpx and h2: '
+                           'pip install "jev-ultralightspeed[fast]"')
+        self.transport = ("http2" if transport == "auto" and _http2.available()
+                          else "threads" if transport == "auto" else transport)
         self._cache: OrderedDict[tuple, Answer] = OrderedDict()
         self._local = threading.local()
+        self._pipe = None
+        self.latencies: list[float] = []
         self._limiter = _Limiter(requests_per_minute)
         self.usage = Usage()
 
@@ -184,11 +200,13 @@ class Client:
                    "accept": "application/json"}
         for attempt in range(MAX_RETRIES):
             self._limiter.take()
+            started = time.monotonic()
             try:
                 connection = self._connection()
                 connection.request("POST", path, body=data, headers=headers)
                 answer = connection.getresponse()
                 payload = answer.read()
+                self.latencies.append((time.monotonic() - started) * 1000)
                 if answer.status == 200:
                     return json.loads(payload.decode("utf-8"))
                 self._drop_connection()
@@ -202,11 +220,21 @@ class Client:
             time.sleep(min(30.0, 2 ** attempt))
         raise JevError("out of retries")
 
+    def _pipe_for(self) -> "_http2.Pipe":
+        if self._pipe is None:
+            self._pipe = _http2.Pipe(self.url, self.key, inflight=self.workers,
+                                     timeout=TIMEOUT_S, retry_statuses=RETRY_STATUSES,
+                                     max_retries=MAX_RETRIES)
+        return self._pipe
+
     def warm(self, workers: int | None = None) -> None:
         """
         Open the connections before the work arrives, so the first items do
         not pay for a TLS handshake. Harmless to call twice.
         """
+        if self.transport == "http2":
+            self._pipe_for().warm()
+            return
         count = workers or self.workers
         def open_one(_):
             self._connection()
@@ -215,8 +243,11 @@ class Client:
 
     # -- the useful call ---------------------------------------------------
     def close(self) -> None:
-        """Let go of this thread's connection. Workers drop theirs with the pool."""
+        """Let go of the connections. Workers drop theirs with the pool."""
         self._drop_connection()
+        if self._pipe is not None:
+            self._pipe.close()
+            self._pipe = None
 
     def classify(
         self,
@@ -263,7 +294,21 @@ class Client:
         groups = [unique[at:at + self.pack] for at in range(0, len(unique), self.pack)]
         done = 0
         started = time.monotonic()
-        if groups:
+        if groups and self.transport == "http2" and not _http2.in_a_loop():
+            # One connection, every request in flight on it.
+            bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
+                      for g in groups]
+            payloads = self._pipe_for().ask_all(
+                bodies, on_request=self._count, on_timing=self.latencies.append)
+            for group, data in zip(groups, payloads):
+                for position, index in enumerate(group, start=1):
+                    answer = _read(self._entry(data, position), texts[index])
+                    answers[index] = answer
+                    self._remember(texts[index], instructions, criteria, options, answer)
+                done += len(group)
+                if on_progress:
+                    on_progress(done, len(unique))
+        elif groups:
             with ThreadPoolExecutor(max_workers=self.workers) as pool:
                 for group, result in zip(groups, pool.map(
                     lambda g: self._ask_group([texts[i] for i in g], instructions, criteria, options),
@@ -283,24 +328,24 @@ class Client:
         return [answer for answer in answers if answer is not None]
 
     # -- the parts ---------------------------------------------------------
+    def _body(self, texts: Sequence[str], instructions: str,
+              criteria: dict | None, options: dict | None) -> dict:
+        return (_one_body(self.model, texts[0], instructions, criteria, options)
+                if len(texts) == 1
+                else _packed_body(self.model, texts, instructions, criteria, options))
+
+    def _entry(self, data: dict, position: int) -> dict:
+        entry = (data.get("answers") or {}).get(f"item_{position}")
+        if entry is None:
+            raise JevError(f"Jev did not answer item_{position} of a packed request")
+        return entry
+
     def _ask_group(self, texts: Sequence[str], instructions: str,
                    criteria: dict | None, options: dict | None) -> list[Answer]:
-        if len(texts) == 1:
-            body = _one_body(self.model, texts[0], instructions, criteria, options)
-            data = self.ask(body)
-            self._count(data)
-            return [_read(data["answers"]["item_1"], texts[0])]
-        body = _packed_body(self.model, texts, instructions, criteria, options)
-        data = self.ask(body)
+        data = self.ask(self._body(texts, instructions, criteria, options))
         self._count(data)
-        answers = data.get("answers") or {}
-        out = []
-        for position, text in enumerate(texts, start=1):
-            entry = answers.get(f"item_{position}")
-            if entry is None:
-                raise JevError(f"Jev did not answer item_{position} of a packed request")
-            out.append(_read(entry, text))
-        return out
+        return [_read(self._entry(data, position), text)
+                for position, text in enumerate(texts, start=1)]
 
     def _count(self, data: dict) -> None:
         usage = data.get("usage") or {}
@@ -392,7 +437,8 @@ def _clean(item: str) -> str:
 def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
     """One call for the common case. Keyword arguments go to `Client`."""
     client_arguments = {name: kwargs.pop(name) for name in
-                        ("key", "url", "model", "pack", "workers", "requests_per_minute", "cache")
+                        ("key", "url", "model", "pack", "workers", "requests_per_minute",
+                         "cache", "transport")
                         if name in kwargs}
     client = Client(**client_arguments)
     return client.classify(list(items), instructions, **kwargs)

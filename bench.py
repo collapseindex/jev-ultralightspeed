@@ -70,27 +70,11 @@ def corpus(size: int) -> list[str]:
     return items
 
 
-class Timed(Client):
-    """A client that remembers how long each request took."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.latencies: list[float] = []
-        self.failures = 0
-
-    def ask(self, body):
-        started = time.monotonic()
-        try:
-            return super().ask(body)
-        except Exception:
-            self.failures += 1
-            raise
-        finally:
-            self.latencies.append((time.monotonic() - started) * 1000)
-
-
-def measure(items, *, pack, workers):
-    client = Timed(pack=pack, workers=workers, cache=False)
+def measure(items, *, pack, workers, transport="auto"):
+    """One run, with the connection already open so setup is not in the time."""
+    client = Client(pack=pack, workers=workers, cache=False, transport=transport)
+    client.failures = 0
+    client.warm()
     answers = client.classify(items, QUESTION, criteria=CRITERIA)
     return answers, client
 
@@ -109,6 +93,7 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--grid", action="store_true", help="sweep pack x workers")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--transport", default="auto", choices=("auto", "http2", "threads"))
     arguments = parser.parse_args()
 
     items = corpus(arguments.items)
@@ -124,7 +109,7 @@ def main() -> int:
           f"shapes in random order\n")
 
     # Warm up: one small call, so no row pays for the first handshake.
-    measure(items[:4], pack=4, workers=1)
+    measure(items[:4], pack=4, workers=1, transport=arguments.transport)
 
     baseline: dict[str, float] = {}
     rows = []
@@ -133,7 +118,8 @@ def main() -> int:
     collected: dict[str, list] = {}
 
     for name, pack, workers in order:
-        answers, client = measure(items, pack=pack, workers=workers)
+        answers, client = measure(items, pack=pack, workers=workers,
+                                  transport=arguments.transport)
         if name == "sequential" and not baseline:
             baseline.update({answer.item: answer.p for answer in answers})
         collected.setdefault(name, []).append((answers, client))

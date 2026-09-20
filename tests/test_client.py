@@ -25,6 +25,9 @@ class Fake(Client):
     """A client whose requests go to a list instead of to Jev."""
 
     def __init__(self, answer=lambda text: 0.9, **kwargs):
+        # These tests replace `ask`, which is the threaded path; the HTTP/2
+        # path carries its own requests and is covered separately.
+        kwargs.setdefault("transport", "threads")
         super().__init__(key="test-key", **kwargs)
         self.sent = []
         self._answer = answer
@@ -191,8 +194,22 @@ def test_the_short_way_is_the_long_way():
     original = Client.ask
     Client.ask = Recording.ask
     try:
-        answers = classify(["one", "two"], QUESTION, key="test-key", pack=2)
+        answers = classify(["one", "two"], QUESTION, key="test-key", pack=2,
+                           transport="threads")
     finally:
         Client.ask = original
     assert [answer.label for answer in answers] == ["yes", "yes"]
     assert len(sent) == 1
+
+
+def test_transport_is_chosen_once_and_checked():
+    from jev_ultralightspeed import _http2
+
+    client = Client(key="k", transport="auto")
+    assert client.transport == ("http2" if _http2.available() else "threads")
+    assert Client(key="k", transport="threads").transport == "threads"
+    with pytest.raises(JevError, match="auto"):
+        Client(key="k", transport="carrier pigeon")
+    if not _http2.available():
+        with pytest.raises(JevError, match="httpx"):
+            Client(key="k", transport="http2")

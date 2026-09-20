@@ -5,6 +5,13 @@
 First release.
 
 ### Added
+- Measured on dinostomp's xstest-refusal pod, 1,347 human-labelled completions: 18x the throughput
+  of one item at a time, 41% less money, agreement with the human labels unchanged (89.5% against
+  90.7%, overlapping intervals). Packing moves about 4% of individual verdicts, where two runs of
+  the same shape move 0.3%.
+- An optional HTTP/2 transport (`pip install "jev-ultralightspeed[fast]"`): one event loop, one
+  connection, every request in flight multiplexed over it, kept open between calls. About twice the
+  threaded standard-library path, which remains the fallback.
 - `classify(items, question)` and a `Client` that packs several items into one request, keeps
   several requests in flight under a rate limit, reuses one connection per worker, deduplicates
   identical text and caches answers by model, question and text.

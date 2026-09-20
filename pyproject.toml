@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jev-ultralightspeed"
 version = "0.1.0"
-description = "Classify a pile of items with TypeSafe's Jev at 47x the throughput of the obvious loop, for a third of the tokens."
+description = "Classify a pile of items with TypeSafe's Jev at 18x the throughput of the obvious loop, for 41% less money, at the same accuracy."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -25,7 +25,8 @@ Homepage = "https://github.com/collapseindex/jev-ultralightspeed"
 Source = "https://github.com/collapseindex/jev-ultralightspeed"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+fast = ["httpx[http2]>=0.27"]
+dev = ["pytest>=8", "httpx[http2]>=0.27"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
