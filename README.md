@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.10.3** · Apache-2.0 · no required dependencies
+**v0.10.4** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="26.5x faster and 41% cheaper: 441 items a second against 16.7, with agreement against human labels 89.2% against 89.3%" width="100%" />
 
@@ -131,10 +131,17 @@ about 1.7x**. Treat 26.5x as the number most likely to move on someone else's ac
 the one that will not. Nothing failed either way: the client backs off with jitter, honours
 `Retry-After` as a floor with jitter on top, and frees its slot while it waits.
 
-**How much room is left, and what is actually in the way.** At `pack=32` and the default 1,000
-requests a minute the ceiling is **533 items/s**, and the measured 441 is 21% below it. That gap is
-not the transport and not concurrency. It is the 245 retries: 942 successful requests in 68 seconds
-is 831 a minute, and the shortfall against 1,000 is the time spent waiting out pushback.
+**How much room is left, and where it probably went.** At `pack=32` and the default 1,000 requests a
+minute the ceiling is **533 items/s**. The measured 441 is 17.3% below it, and reaching it would be a
+20.9% improvement.
+
+That gap is most likely the 245 retries. 942 successful requests in 68 seconds is 831 a minute, and
+the request rate falling 16.9% short of the ceiling accounts for almost exactly the 17.3% shortfall in
+items. Where the time went can be estimated but not proved from that run: eight workers over 68
+seconds is 544 worker-seconds, 942 requests at the 318ms mean latency measured today would be about
+300 of them, and the 244 left over against 245 retries is close to a second each, which is what the
+backoff asks for on an early attempt. Consistent, not established: the run recorded neither the status
+codes nor the time spent waiting, so retries cannot be separated from a slower service that day.
 
 | pack | items/s ceiling at 1,000 requests a minute |
 | ---: | ---: |
@@ -142,28 +149,33 @@ is 831 a minute, and the shortfall against 1,000 is the time spent waiting out p
 | 32 | 533 |
 | 64 | 1,067 |
 
-**Four requests in flight is enough to reach that ceiling**, which was worth measuring because the
-arithmetic looked like it said otherwise. Dividing the headline run's 68 seconds by its 942 requests
-and 8 workers gives 577ms, and 4 workers at 577ms would allow only 416 requests a minute, 42% of the
-ceiling. That reasoning is wrong: 577ms is wall clock divided by workers, which folds in every retry
-wait, not the latency of a request. Measured directly, at `pack=32` over 40 requests an arm:
+**Four requests in flight gets to within 1% of that ceiling, in a burst.** This was worth measuring
+because arithmetic said otherwise: dividing the headline run's 68 seconds by its 942 requests and 8
+workers gives 577ms, and 4 workers at 577ms would allow only 416 requests a minute. That reasoning is
+wrong, because 577ms is wall clock over workers and folds in every retry wait rather than being the
+latency of a request. Measured at `pack=32` over 40 requests an arm:
 
-| workers | p50 latency | what that latency allows | burst measured |
-| ---: | ---: | ---: | ---: |
-| **4** | **202ms** | **1,191 req/min** | 993 |
-| 8 | 270ms | 1,777 | 1,510 |
-| 12 | 327ms | 2,201 | 2,017 |
-| 16 | 337ms | 2,845 | 2,485 |
-| 24 | 480ms | 3,000 | 2,616 |
+| workers | p50 | mean | requests/min | of the 1,000 ceiling |
+| ---: | ---: | ---: | ---: | ---: |
+| **4** | 202ms | **242ms** | **993** | **99.3%** |
+| 8 | 270ms | 318ms | 1,510 | 151% |
+| 12 | 327ms | 357ms | 2,017 | 202% |
+| 16 | 337ms | 386ms | 2,485 | 249% |
+| 24 | 480ms | 550ms | 2,616 | 262% |
 
-So the default of four is not holding anything back, and more of them buy burst rather than sustained
-throughput, because sustained is what the limiter allows and nothing else. They are also not free:
-latency more than doubles between 4 and 24, so the service is queueing, and the arithmetic that says
-twenty-four workers are six times four is wrong by about 60%. Raise `workers` if you have raised
-`requests_per_minute`; otherwise leave it. `bench_workers.py` reruns this for about ten cents.
+So the default of four is not holding anything back, but it has no margin either: it reaches 99.3% of
+the ceiling with nothing spare, and latency is what decides that. More workers buy burst rather than
+sustained throughput, since sustained is whatever the limiter allows and nothing else, and they are
+not free: mean latency more than doubles between 4 and 24, so the service queues and the arithmetic
+saying twenty-four workers are six times four is out by about 60%.
 
-Those burst figures are above the ceiling because forty requests cannot fill a sixty second window.
-No number in that table is a sustained rate, and none of them had a single retry.
+**Two things that table cannot tell you.** Forty requests cannot fill a sixty second window, so every
+figure is a burst and none is a sustained rate: whether four workers hold 993 a minute for ten minutes
+is untested. And the mean is what governs a queue's throughput, not the median, which is why the mean
+is the column to read. An earlier version of this section quoted a rate derived from the median and
+was optimistic by about a fifth, as well as circular, since in a burst the measured rate is the
+latency bound. Raise `workers` if you raise `requests_per_minute`, or if you see the request rate
+falling short. Otherwise leave it. `bench_workers.py` reruns this for about ten cents.
 
 It is also not compute-bound. At 441 items/s and 341 tokens an item it is moving roughly 600 KB/s of
 JSON, so `orjson`, `uvloop` and more cores have nothing to do here. Every remaining lever is about

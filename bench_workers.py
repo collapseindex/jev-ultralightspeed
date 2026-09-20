@@ -3,20 +3,20 @@ How many requests in flight does it take to reach the rate ceiling?
 
     XSTEST_ITEMS=../dinostomp/audits/xstest-refusal/items.jsonl python bench_workers.py
 
-The headline benchmark was not limited by the rate ceiling. It ran 942 requests in
-68 seconds on 8 workers, which is 577ms a request, and 8 workers at 577ms allow
-831 requests a minute, or 443 items a second at pack=32. It measured 441. The
-limiter, set to 1,000 a minute, never bound at all.
+Sustained throughput is min(the ceiling, workers / mean latency) x pack, and only
+the second term was ever unknown. The answer, at pack=32, is that four workers
+reach 99.3% of a 1,000 a minute ceiling: enough, with nothing spare.
 
-Which means concurrency is the constraint nobody was looking at, and the default
-of 4 workers allows 416 requests a minute: 42% of what the ceiling permits.
+The mean matters and the median will flatter you. Throughput through a queue goes
+as the mean service time, and the mean here runs about a fifth above the median, so
+a bound computed from the median overstates what the workers can do. In a burst the
+measured request rate is itself the latency bound, which makes any derived bound
+circular as well as optimistic, so this prints both and leans on the measurement.
 
-    requests a minute = min(the ceiling, workers / latency)
-
-The open question is the second term. If the service queues, latency grows with
-concurrency and more workers buy less than the arithmetic promises. That is what
-this measures, and it is cheap because it needs latency rather than volume: forty
-requests an arm, about ten cents in total.
+What this cannot show is whether a rate holds up. Forty requests an arm cannot fill
+a sixty second window, so every number here is a burst. It is cheap for the same
+reason: it needs a latency distribution rather than volume, and costs about ten
+cents.
 """
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ def main() -> int:
         client.close()
         rows.append({
             "workers": workers, "seconds": wall,
+            "mean_latency_ms": statistics.mean(latencies) if latencies else 0.0,
             "requests_per_minute": usage.requests / wall * 60,
             "items_per_second": len(answers) / wall,
             "p50": statistics.median(latencies) if latencies else 0.0,
@@ -97,17 +98,19 @@ def main() -> int:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
 
-    print(f"\n{'workers':>8}{'p50 ms':>9}{'p95 ms':>9}{'req/min':>9}"
-          f"{'what workers allow':>20}{'items/s':>9}{'retries':>9}")
+    print(f"\n{'workers':>8}{'p50 ms':>8}{'mean':>8}{'p95 ms':>8}{'req/min':>9}"
+          f"{'of ceiling':>12}{'items/s':>9}{'retries':>9}")
     for row in sorted(rows, key=lambda r: r["workers"]):
-        allowed = row["workers"] / (row["p50"] / 1000) * 60 if row["p50"] else 0.0
-        print(f"{row['workers']:>8}{row['p50']:>9.0f}{row['p95']:>9.0f}"
-              f"{row['requests_per_minute']:>9.0f}{allowed:>20.0f}"
+        share = row["requests_per_minute"] / CEILING_PER_MINUTE
+        print(f"{row['workers']:>8}{row['p50']:>8.0f}{row['mean_latency_ms']:>8.0f}"
+              f"{row['p95']:>8.0f}{row['requests_per_minute']:>9.0f}{share:>11.0%}"
               f"{row['items_per_second']:>9.1f}{row['retries']:>9}")
     print(f"\nThe ceiling is {CEILING_PER_MINUTE} requests a minute, "
           f"{CEILING_PER_MINUTE * arguments.pack / 60:.0f} items a second at pack={arguments.pack}.")
-    print("These runs are short, so the limiter's window never fills and nothing here is")
-    print("sustained. What is measured is latency, and what that allows over a long job.")
+    print("Forty requests cannot fill a sixty second window, so every rate above is a burst")
+    print("and none of them is sustained. Read the mean, not the median: throughput through a")
+    print("queue goes as the mean, and in a burst the measured rate is already the latency")
+    print("bound, so any figure derived from the median is both optimistic and circular.")
     print(f"written to {path}\n")
     return 0
 

@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.10.4 (2026-09-20)
+
+No library change. Three claims from the last release, weakened to what the evidence supports. A
+review pointed at all three and was right about all three.
+
+### Corrected
+- **"Four workers is enough" was derived from the median, which flatters it.** Throughput through a
+  queue goes as the **mean** service time, and in a burst the measured request rate is already the
+  latency bound, so the derived "1,191 requests a minute" was both optimistic by about a fifth and
+  circular. The mean is recoverable from the same run, as workers over the achieved rate:
+
+  | workers | p50 | mean | requests/min | of the 1,000 ceiling |
+  | ---: | ---: | ---: | ---: | ---: |
+  | **4** | 202ms | **242ms** | **993** | **99.3%** |
+  | 8 | 270ms | 318ms | 1,510 | 151% |
+  | 12 | 327ms | 357ms | 2,017 | 202% |
+  | 16 | 337ms | 386ms | 2,485 | 249% |
+  | 24 | 480ms | 550ms | 2,616 | 262% |
+
+  Four workers reach 99.3% of the ceiling, which is enough with nothing spare rather than comfortably
+  enough. It is still a burst: forty requests cannot fill a sixty second window, so whether four
+  workers hold 993 a minute for ten minutes is untested and the README now says so. The default stays
+  at 4.
+- **"The gap is the retries" is now "most likely the retries".** The evidence supports retries
+  contributing and does not establish that they account for all of it. The estimate is in the README
+  with its arithmetic: 544 worker-seconds available, about 300 of them for 942 requests at today's
+  mean, and the 244 left against 245 retries is close to a second each, which is what an early backoff
+  asks for. Consistent, not established, because that run kept neither status codes nor waiting time,
+  so a slower service that day cannot be ruled out.
+- **441 against 533 is 17.3% below, and 20.9% to close.** The last release said 21% below, which is the
+  other direction.
+- `bench_workers.py` had kept the argument the previous release retracted in its own docstring, and so
+  in its `--help`. Rewritten, and it records and prints the mean now.
+
+111 tests, no key and no network needed.
+
 ## v0.10.3 (2026-09-20)
 
 No library change. A measurement, and a derivation of mine that it corrected before it reached the
