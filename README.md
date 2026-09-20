@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.13.0** · Apache-2.0 · no required dependencies
+**v0.14.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -319,6 +319,39 @@ plus the longest question, and `pack` counts items, so several individually lega
 illegal request. Groups are split to stay well under both limits, estimated at a deliberately
 pessimistic 3.5 characters per token against 3.92 measured on a live packed request. Short items are
 unaffected and still pack to `pack`.
+
+### When every row asks something different
+
+`classify` sends one question about every item. The API does not work that way: its body carries a
+question **per item**, and `classify` is the case where they all happen to be the same. `judge` is the
+case where they are not.
+
+```python
+from jev_ultralightspeed import Ask, judge
+
+answers = judge(
+    [Ask(row.text, options=row.allowed_labels) for row in rows],
+    instructions="Which of these applies?",
+)
+```
+
+This matters most when the answer space itself differs per row, because then there is nothing to group
+by and packing has nothing to work with. Sixty-four rows that each pick from their own set of labels,
+against a local server:
+
+| | requests |
+| --- | ---: |
+| `classify`, one call a row | 64 |
+| `judge` | **2** |
+
+Which is the pack depth again, and it is the whole of the library's benefit arriving for a workload
+that was getting none of it.
+
+Anything an `Ask` leaves out falls back to what the call was given, so mixing is fine. Packing,
+deduplication, the cache, the checkpoint and `triage` all behave as they do for `classify`, with two
+differences worth knowing: two rows count as duplicates only when the question matches as well as the
+text, and `guidance="once"` needs a pack to be asking one thing before there is anything to hoist, so a
+mixed pack keeps its questions where they are.
 
 ### Trimming the items
 
@@ -675,7 +708,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 117 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 124 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls

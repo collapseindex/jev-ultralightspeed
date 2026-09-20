@@ -6,6 +6,7 @@ answers from the request it is given, so these run anywhere, for free.
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -19,6 +20,13 @@ from jev_ultralightspeed import (Answer, Client, JevError, _Limiter,          # 
                                  _packed_body, _read, classify)
 
 QUESTION = "Does this need a human today?"
+
+
+def asks_for(texts, instructions, *, criteria=None, options=None):
+    """The engine's own record, for the tests that build a request by hand."""
+    from jev_ultralightspeed import _Ask
+
+    return [_Ask(text, instructions, criteria, options) for text in texts]
 
 
 class Fake(Client):
@@ -52,7 +60,7 @@ def test_packs_items_and_keeps_their_order():
 
 
 def test_a_packed_question_names_the_item_it_judges():
-    body = _packed_body("jev-latest", ["first", "second"], QUESTION, None, None)
+    body = _packed_body("jev-latest", asks_for(["first", "second"], QUESTION))
     assert body["state"] == {"item_1": "first", "item_2": "second"}
     assert "item_2 only" in body["questions"]["item_2"]["instructions"]
     assert body["questions"]["item_1"]["type"] == "noul"
@@ -487,6 +495,7 @@ class Answering:
 
         self.seen = 0
         self.warmed = 0
+        self.bodies = []                    # what arrived, for tests about the request
         self.lock = _threading.Lock()
         server = self
 
@@ -494,10 +503,12 @@ class Answering:
             protocol_version = "HTTP/1.1"
 
             def do_POST(self):
-                asked = _json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
+                raw = self.rfile.read(int(self.headers.get("content-length", 0)))
+                asked = _json.loads(raw)
                 with server.lock:
                     server.seen += 1
                     number = server.seen
+                    server.bodies.append(raw)
                 if delay:
                     time.sleep(delay)
                 carries = str(asked.get("state"))
@@ -1210,7 +1221,8 @@ def test_guidance_once_puts_the_question_in_the_state_and_points_at_it():
 
     instructions = "Does this need a human today?"
     criteria = {"true": "broken now", "false": "can wait"}
-    body = _packed_body("m", ["a", "b", "c"], instructions, criteria, None, "once")
+    body = _packed_body("m", asks_for(["a", "b", "c"], instructions, criteria=criteria),
+                        "once")
 
     assert body["state"][GUIDANCE].startswith(instructions)
     assert "true: broken now" in body["state"][GUIDANCE]
@@ -1230,7 +1242,7 @@ def test_the_option_names_stay_in_every_question():
     from jev_ultralightspeed import GUIDANCE, _packed_body
 
     options = {"yes_please": "a", "no_thanks": "b"}
-    body = _packed_body("m", ["a", "b"], "Which?", None, options, "once")
+    body = _packed_body("m", asks_for(["a", "b"], "Which?", options=options), "once")
     assert body["state"][GUIDANCE] == "Which?"
     for question in body["questions"].values():
         assert question["criteria"] == options
@@ -1644,3 +1656,94 @@ def test_several_clients_can_hold_one_ceiling_between_them():
 def test_a_client_without_one_gets_its_own():
     first, second = Fake(), Fake()
     assert first._limiter is not second._limiter
+
+
+# -- a question of its own --------------------------------------------------
+
+@both_transports
+def test_rows_with_their_own_answer_space_still_share_a_request(transport):
+    """
+    The case this exists for. When every row picks from its own set of labels
+    there is nothing to group by, so without it each row is a pack of one.
+    """
+    from jev_ultralightspeed import Ask
+
+    server = Answering()
+    client = a_real_client(server.url, transport, pack=8, workers=2)
+    asks = [Ask(f"row {n}", options={f"label_{n}": "a", "other": "b"}) for n in range(16)]
+    try:
+        answers = client.judge(asks, instructions="Which applies?")
+    finally:
+        client.close()
+        server.close()
+
+    assert [a.item for a in answers] == [f"row {n}" for n in range(16)]
+    assert server.seen == 2, f"{server.seen} requests for 16 rows at pack=8"
+    sent = json.loads(server.bodies[0])
+    assert len(sent["questions"]) == 8
+    spaces = [tuple(sorted(q["criteria"])) for q in sent["questions"].values()]
+    assert len(set(spaces)) == 8, "the rows were given the same answer space"
+
+
+def test_an_ask_falls_back_to_what_the_call_was_given():
+    from jev_ultralightspeed import Ask
+
+    client = Fake(pack=4)
+    client.judge([Ask("a"), Ask("b", instructions="something else")],
+                 instructions="the usual", criteria={"true": "t", "false": "f"})
+    questions = list(client.sent[0]["questions"].values())
+    assert "the usual" in questions[0]["instructions"]
+    assert "something else" in questions[1]["instructions"]
+    assert questions[0]["criteria"] == {"true": "t", "false": "f"}
+    assert questions[1]["criteria"] == {"true": "t", "false": "f"}, "criteria should carry over"
+
+
+def test_the_same_row_asked_two_things_is_two_answers():
+    """Deduplication keys on the question as well as the text."""
+    from jev_ultralightspeed import Ask
+
+    client = Fake(pack=8)
+    answers = client.judge([Ask("same text", instructions="first question"),
+                            Ask("same text", instructions="second question"),
+                            Ask("same text", instructions="first question")],
+                           instructions="unused")
+    assert len(answers) == 3
+    asked = sum(len(body["state"]) for body in client.sent)
+    assert asked == 2, f"{asked} rows sent; the repeat of the first question should collapse"
+    assert client.usage.cached == 1
+
+
+def test_judge_says_so_when_handed_plain_text():
+    from jev_ultralightspeed import Ask
+
+    client = Fake()
+    with pytest.raises(JevError, match="Ask objects"):
+        client.judge(["just a string"], instructions="q")
+    with pytest.raises(JevError, match="no instructions"):
+        client.judge([Ask("a")])
+
+
+def test_a_mixed_pack_keeps_its_questions_where_they_are():
+    """There is nothing to hoist when the rows are not asking the same thing."""
+    from jev_ultralightspeed import GUIDANCE, Ask
+
+    client = Fake(pack=4, guidance="once")
+    client.judge([Ask("a", instructions="one"), Ask("b", instructions="two")])
+    assert GUIDANCE not in client.sent[0]["state"]
+    client.sent.clear()
+    client.judge([Ask("c"), Ask("d")], instructions="the same for both")
+    assert GUIDANCE in client.sent[0]["state"], "a uniform pack should still hoist"
+
+
+def test_the_question_is_serialised_once_per_distinct_question_not_per_row():
+    """The v0.9.1 saving has to survive rows carrying their own questions."""
+    from jev_ultralightspeed import Ask
+
+    shared = {"true": "t", "false": "f"}
+    client = Fake(pack=64)
+    calls = []
+    original = client._shape
+    client._shape = lambda *a: (calls.append(1), original(*a))[1]
+    client.judge([Ask(f"row {n}", criteria=shared) for n in range(64)],
+                 instructions="the same question")
+    assert len(calls) == 1, f"the question was serialised {len(calls)} times for 64 rows"

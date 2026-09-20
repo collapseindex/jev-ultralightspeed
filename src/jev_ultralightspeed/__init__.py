@@ -34,12 +34,12 @@ import urllib.parse
 from collections import OrderedDict, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as wait_for
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, NamedTuple, Sequence
 
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -75,6 +75,9 @@ CHARS_PER_TOKEN = 3.5                  # conservative: 3.92 measured on a live p
 SKIP_FRACTION = 0.01                   # of the items in a call, before skipping gives up
 MIN_SKIP_BUDGET = 5                    # requests' worth, so a small call is not held to 1%
 MAX_FAILURES_KEPT = 1_000              # reported in full; the rest are counted only
+_CLIENT_ARGUMENTS = ("key", "url", "model", "pack", "workers", "requests_per_minute",
+                     "cache", "dedupe", "transport", "verify", "guidance", "paced",
+                     "limiter")
 WINDOW_PER_WORKER = 2                  # requests queued per worker, so a straggler is not a wall
 DRAIN_S = 5.0                          # how long an abandoned run waits for what is still in the air
 
@@ -125,6 +128,31 @@ class Answer:
         if self.kind == "noul":
             return max(self.p, 1.0 - self.p)
         return self.p
+
+
+@dataclass
+class Ask:
+    """
+    One item, and the question to ask about it.
+
+    For `judge()`, when the question is not the same for every row. Anything left
+    out falls back to what the call was given, so `Ask("some text")` is an
+    ordinary item and `Ask(text, options={...})` is one with its own answer space.
+    """
+
+    item: str
+    instructions: str | None = None
+    criteria: dict | None = None
+    options: dict | None = None
+
+
+class _Ask(NamedTuple):
+    """An ask with its defaults already filled in, which is what the engine sees."""
+
+    text: str
+    instructions: str
+    criteria: dict | None
+    options: dict | None
 
 
 @dataclass
@@ -495,11 +523,12 @@ class Client:
         for item in items:
             batch.append(item)
             if len(batch) >= chunk:
-                yield from self._answers_for(batch, instructions, criteria, options,
+                yield from self._answers_for(self._asks(batch, instructions, criteria,
+                                                       options),
                                              on_progress, checkpoint, on_error)
                 batch = []
         if batch:
-            yield from self._answers_for(batch, instructions, criteria, options,
+            yield from self._answers_for(self._asks(batch, instructions, criteria, options),
                                          on_progress, checkpoint, on_error)
 
     def classify(
@@ -538,11 +567,76 @@ class Client:
         abandoned and raises, because a wrong key must not be skipped a million
         times over.
         """
-        return list(self._answers_for(items, instructions, criteria, options,
+        return list(self._answers_for(self._asks(items, instructions, criteria, options),
                                       on_progress, checkpoint, on_error))
 
-    def _answers_for(self, items, instructions, criteria, options,
-                     on_progress, checkpoint, on_error):
+    def judge(
+        self,
+        asks: Iterable[Ask],
+        *,
+        instructions: str | None = None,
+        criteria: dict | None = None,
+        options: dict | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+        checkpoint: str | os.PathLike | None = None,
+        on_error: str = "raise",
+    ) -> list[Answer]:
+        """
+        Answer a different question about each item, packed the same way.
+
+            answers = client.judge([
+                Ask(row.text, options=row.allowed_labels)
+                for row in rows
+            ], instructions="Which of these applies?")
+
+        The API has always had one question per item; `classify` is the case
+        where they all happen to be the same. This is the case where they are
+        not: an answer space that differs per row cannot be grouped by question
+        at all, so without this it is a pack of one every time.
+
+        Anything an `Ask` leaves out falls back to what this call was given.
+        Packing, deduplication, the cache, the checkpoint and `triage` all work
+        as they do for `classify`, except that two rows count as duplicates only
+        when the question matches as well as the text. `guidance="once"` needs a
+        pack to be asking one thing before there is anything to hoist, so a mixed
+        pack quietly keeps its questions where they are.
+        """
+        prepared = []
+        # Copied once per distinct question, not per row, so the rows that share
+        # one share the object. The engine leans on that.
+        copies: dict[int, tuple] = {}
+        for index, ask in enumerate(asks):
+            if not isinstance(ask, Ask):
+                raise JevError(f"judge() takes Ask objects; item {index + 1} is a "
+                               f"{type(ask).__name__}. classify() takes plain text.")
+            mark = (id(ask.instructions), id(ask.criteria), id(ask.options))
+            settled = copies.get(mark)
+            if settled is None:
+                words = ask.instructions if ask.instructions is not None else instructions
+                if not words:
+                    raise JevError(f"item {index + 1} has no instructions, and none were "
+                                   f"given to judge() either")
+                these = ask.criteria if ask.criteria is not None else criteria
+                those = ask.options if ask.options is not None else options
+                settled = copies[mark] = (words, dict(these) if these else these,
+                                          dict(those) if those else those)
+            prepared.append(_Ask(_clean(ask.item, index), *settled))
+        return list(self._answers_for(prepared, on_progress, checkpoint, on_error))
+
+    def _asks(self, items, instructions, criteria, options) -> list["_Ask"]:
+        """
+        The same question against every item, which is what `classify` means.
+
+        The mappings are copied once here rather than per row: a stream is
+        suspended between answers and the caller still holds them, so changing
+        one mid-run would otherwise change the questions still to be sent.
+        """
+        criteria = dict(criteria) if criteria else criteria
+        options = dict(options) if options else options
+        return [_Ask(_clean(item, index), instructions, criteria, options)
+                for index, item in enumerate(items)]
+
+    def _answers_for(self, asks, on_progress, checkpoint, on_error):
         """
         The engine both callers share: plan the requests, keep a bounded number
         of them in flight, bank each one where it lands, and give answers back in
@@ -554,28 +648,38 @@ class Client:
         """
         if on_error not in ("raise", "skip"):
             raise JevError('on_error must be "raise" or "skip"')
-        texts = [_clean(item, index) for index, item in enumerate(items)]
-        if not texts:
+        asks = list(asks)
+        if not asks:
             return
+        texts = [ask.text for ask in asks]
 
-        # Copied, because a stream is suspended between answers and the caller
-        # holds the same dictionaries. Changing one mid-run would otherwise
-        # change the questions still to be sent, halfway through a job.
-        criteria = dict(criteria) if criteria else criteria
-        options = dict(options) if options else options
-        shape = self._shape(instructions, criteria, options)
+        # One shape and one overhead per distinct question, not per item. Rows
+        # sharing a question share the object, because the questions were copied
+        # once on the way in, so identity finds them without comparing dicts.
+        shapes: list[tuple] = []
+        overheads: list[int] = []
+        worked_out: dict[tuple, tuple] = {}
+        for ask in asks:
+            mark = (id(ask.instructions), id(ask.criteria), id(ask.options))
+            known = worked_out.get(mark)
+            if known is None:
+                known = worked_out[mark] = (self._shape(ask.instructions, ask.criteria,
+                                                        ask.options),
+                                            self._overhead(ask))
+            shapes.append(known[0])
+            overheads.append(known[1])
 
         answers: list[Answer | None] = [None] * len(texts)
         self.last_partial = []
         ledger = self._ledger_for(checkpoint)
         todo: list[int] = []
         for index, text in enumerate(texts):
-            hit = self._cached(text, shape)
+            hit = self._cached(text, shapes[index])
             if hit is not None:
                 answers[index] = _copy_answer(hit, text)
                 self.usage.cached += 1
                 continue
-            stored = (ledger.answer_for(self._key(text, shape), text)
+            stored = (ledger.answer_for(self._key(text, shapes[index]), text)
                       if ledger is not None else None)
             if stored is not None:
                 answers[index] = Answer(item=text, p=stored.p, label=stored.label,
@@ -587,11 +691,13 @@ class Client:
                 todo.append(index)
 
         # The same text twice is one question, answered once.
-        first_seen: dict[str, int] = {}
+        first_seen: dict[tuple, int] = {}
         unique: list[int] = []
         copies: dict[int, list[int]] = {}
         for index in todo:
-            text = texts[index]
+            # Keyed by the question as well as the text: with judge() the same
+            # row can be asked two different things, and those are two answers.
+            text = (texts[index], shapes[index])
             if self.dedupe and text in first_seen:
                 copies.setdefault(first_seen[text], []).append(index)
                 self.usage.cached += 1
@@ -599,7 +705,7 @@ class Client:
                 first_seen[text] = index
                 unique.append(index)
 
-        groups = self._plan(unique, texts, instructions, criteria, options)
+        groups = self._plan(unique, asks, overheads)
         # One budget in items, whether they were lost an item or a request at a
         # time, so "skip" cannot turn a broken run into a million empty answers.
         budget = (max(MIN_SKIP_BUDGET * self.pack, int(len(unique) * SKIP_FRACTION))
@@ -617,7 +723,7 @@ class Client:
         def settle(index: int, answer: Answer) -> None:
             answers[index] = answer
             if answer.ok:
-                self._remember(texts[index], shape, answer)
+                self._remember(texts[index], shapes[index], answer)
             for copy in copies.get(index, ()):
                 answers[copy] = _copy_answer(answer, texts[copy])
                 if not answer.ok:
@@ -633,13 +739,11 @@ class Client:
         pool = None if rolling else (self._pool_for() if groups else None)
 
         def start(which: int):
-            texts_here = [texts[index] for index in groups[which]]
+            here = [asks[index] for index in groups[which]]
             if rolling:
-                return pipe.submit(self._body(texts_here, instructions, criteria, options),
-                                   run, on_request=self._count, on_timing=self._note_latency,
-                                   on_retry=self._count_retry)
-            return pool.submit(self._ask_group, texts_here, instructions,
-                               criteria, options, spare)
+                return pipe.submit(self._body(here), run, on_request=self._count,
+                                   on_timing=self._note_latency, on_retry=self._count_retry)
+            return pool.submit(self._ask_group, here, spare)
 
         def finish(which: int, future) -> list[Answer]:
             if rolling:
@@ -673,7 +777,7 @@ class Client:
                             raise
                         here = [self._gave_up(texts[index], str(error), position, len(group))
                                 for position, index in enumerate(group, start=1)]
-                    self._bank(ledger, group, texts, here, shape)
+                    self._bank(ledger, group, texts, here, shapes)
                     for index, answer in zip(group, here):
                         settle(index, answer)
                     done += len(here)
@@ -720,12 +824,9 @@ class Client:
             self.usage.seconds += time.monotonic() - started
 
     # -- the parts ---------------------------------------------------------
-    def _body(self, texts: Sequence[str], instructions: str,
-              criteria: dict | None, options: dict | None) -> dict:
-        return (_one_body(self.model, texts[0], instructions, criteria, options)
-                if len(texts) == 1
-                else _packed_body(self.model, texts, instructions, criteria, options,
-                                  self.guidance))
+    def _body(self, asks: Sequence["_Ask"]) -> dict:
+        return (_one_body(self.model, asks[0]) if len(asks) == 1
+                else _packed_body(self.model, asks, self.guidance))
 
     def _entry(self, data: dict, position: int) -> dict:
         entry = (data.get("answers") or {}).get(f"item_{position}")
@@ -733,11 +834,10 @@ class Client:
             raise JevError(f"Jev did not answer item_{position} of a packed request")
         return entry
 
-    def _ask_group(self, texts: Sequence[str], instructions: str,
-                   criteria: dict | None, options: dict | None, spare=None) -> list[Answer]:
-        data = self.ask(self._body(texts, instructions, criteria, options))
+    def _ask_group(self, asks: Sequence["_Ask"], spare=None) -> list[Answer]:
+        data = self.ask(self._body(asks))
         self._count(data)
-        return self._read_all(data, texts, spare)
+        return self._read_all(data, [ask.text for ask in asks], spare)
 
     def _read_all(self, data: dict, texts: Sequence[str], spare=None) -> list[Answer]:
         """
@@ -793,7 +893,15 @@ class Client:
             if len(self.latencies) > MAX_LATENCIES:
                 del self.latencies[:len(self.latencies) - MAX_LATENCIES]
 
-    def _plan(self, indexes, texts, instructions, criteria, options) -> list[list[int]]:
+    def _overhead(self, ask: "_Ask") -> int:
+        """Characters one item's question adds to a request, before its text."""
+        if self.guidance == "once":
+            return len(json.dumps(_question("Judge item_00 only, ignoring every other item, "
+                                            "against the question in guidance.",
+                                            None, ask.options)))
+        return len(json.dumps(_question(ask.instructions, ask.criteria, ask.options)))
+
+    def _plan(self, indexes, asks, overheads) -> list[list[int]]:
         """
         Groups of at most `pack` items that also fit inside one request.
 
@@ -802,20 +910,16 @@ class Client:
         that likelier. The estimate is deliberately pessimistic, at 3.5
         characters per token against 3.92 measured on a live packed request, and
         it counts the question block once per item because that is how the API
-        is shaped.
+        is shaped. With `judge()` the questions differ, so each item brings its
+        own.
         """
-        if self.guidance == "once":
-            overhead = len(json.dumps(_question("Judge item_00 only, ignoring every "
-                                                "other item, against the question in guidance.",
-                                                None, options)))
-        else:
-            overhead = len(json.dumps(_question(instructions, criteria, options)))
         groups: list[list[int]] = []
         current: list[int] = []
         state_chars = 0
         request_chars = 0
         for index in indexes:
-            chars = len(texts[index]) + 12                    # the item_N key rides along
+            overhead = overheads[index]
+            chars = len(asks[index].text) + 12                # the item_N key rides along
             fits = (len(current) < self.pack
                     and (state_chars + chars) < MAX_STATE_TOKENS * CHARS_PER_TOKEN
                     and (request_chars + chars + overhead) < MAX_REQUEST_TOKENS * CHARS_PER_TOKEN)
@@ -829,7 +933,7 @@ class Client:
             groups.append(current)
         return groups
 
-    def _bank(self, ledger, group, texts, answers, shape) -> None:
+    def _bank(self, ledger, group, texts, answers, shapes) -> None:
         """
         Put these answers in the checkpoint. A skipped item is left out on
         purpose: banking "no answer" would make the next run skip it too, and
@@ -839,7 +943,7 @@ class Client:
             return
         for index, answer in zip(group, answers):
             if answer.ok:
-                ledger.record(self._key(texts[index], shape), answer)
+                ledger.record(self._key(texts[index], shapes[index]), answer)
 
     def _ledger_for(self, checkpoint) -> Ledger | None:
         """
@@ -934,39 +1038,57 @@ def _guidance_text(instructions: str, criteria: dict | None, options: dict | Non
     return "\n".join(lines)
 
 
-def _one_body(model, text, instructions, criteria, options) -> dict:
-    return {"model": model, "state": {"item_1": text},
-            "questions": {"item_1": _question(instructions, criteria, options)}}
+def _one_body(model, ask: "_Ask") -> dict:
+    return {"model": model, "state": {"item_1": ask.text},
+            "questions": {"item_1": _question(ask.instructions, ask.criteria, ask.options)}}
 
 
-def _packed_body(model, texts: Sequence[str], instructions, criteria, options,
-                 guidance: str = "repeat") -> dict:
+def _same_question(asks: Sequence["_Ask"]) -> bool:
+    """
+    Whether every ask in a pack is asking the same thing.
+
+    By identity, not by value: the questions in a call are copied once at the
+    start, so rows sharing a question share the object, and comparing dicts for
+    every pack would cost more than it saves.
+    """
+    first = asks[0]
+    return all(ask.instructions is first.instructions
+               and ask.criteria is first.criteria
+               and ask.options is first.options for ask in asks[1:])
+
+
+def _packed_body(model, asks: Sequence["_Ask"], guidance: str = "repeat") -> dict:
     """
     Several items in one state, one question each, every question naming the
-    item it is about. Nothing about the question changes but that name.
+    item it is about.
+
+    The questions can differ, because the API has one per item and always did.
+    Usually they do not, and then the only thing that changes between them is
+    that name.
 
     With `guidance="once"` the question's wording moves into the state under one
     key and each question points at it. Measured on a live 32-item request with a
     long yes/no question, that took the billed input from 4,598 tokens to 1,777,
-    because repeating the whole question thirty-two times is most of the body.
-    It is a different prompt, so it is not the default.
+    because repeating the whole question thirty-two times is most of the body. It
+    is a different prompt, so it is not the default, and it needs every item in
+    the pack to be asking the same thing before there is anything to share.
     """
-    state = {f"item_{position}": text for position, text in enumerate(texts, start=1)}
-    shared = guidance == "once"
+    state = {f"item_{position}": ask.text for position, ask in enumerate(asks, start=1)}
+    shared = guidance == "once" and _same_question(asks)
     if shared:
-        state[GUIDANCE] = _guidance_text(instructions, criteria, options)
+        state[GUIDANCE] = _guidance_text(asks[0].instructions, asks[0].criteria, asks[0].options)
     questions = {}
-    for position in range(1, len(texts) + 1):
+    for position, ask in enumerate(asks, start=1):
         name = f"item_{position}"
         if shared:
             questions[name] = _question(
                 f"Judge {name} only, ignoring every other item, "
                 f"against the question in {GUIDANCE}.",
-                None, options)
+                None, ask.options)
         else:
             questions[name] = _question(
-                f"{instructions} Judge {name} only, ignoring every other item.",
-                criteria, options)
+                f"{ask.instructions} Judge {name} only, ignoring every other item.",
+                ask.criteria, ask.options)
     return {"model": model, "state": state, "questions": questions}
 
 
@@ -1067,11 +1189,20 @@ def _clean(item: str, index: int = 0) -> str:
 
 # -- the short way ----------------------------------------------------------
 
+def judge(asks: Iterable[Ask], **kwargs) -> list[Answer]:
+    """One call for a pile of items with questions of their own. See `Client.judge`."""
+    client_arguments = {name: kwargs.pop(name) for name in _CLIENT_ARGUMENTS
+                        if name in kwargs}
+    client = Client(**client_arguments)
+    try:
+        return client.judge(list(asks), **kwargs)
+    finally:
+        client.close()
+
+
 def classify(items: Iterable[str], instructions: str, **kwargs) -> list[Answer]:
     """One call for the common case. Keyword arguments go to `Client`."""
-    client_arguments = {name: kwargs.pop(name) for name in
-                        ("key", "url", "model", "pack", "workers", "requests_per_minute",
-                         "cache", "dedupe", "transport", "verify", "guidance", "paced")
+    client_arguments = {name: kwargs.pop(name) for name in _CLIENT_ARGUMENTS
                         if name in kwargs}
     client = Client(**client_arguments)
     try:

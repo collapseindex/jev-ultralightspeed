@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.14.0 (2026-09-20)
+
+### Added
+- **`judge(asks)` and `Ask`**, for a pile of items with questions of their own.
+
+      answers = judge([Ask(row.text, options=row.allowed_labels) for row in rows],
+                      instructions="Which of these applies?")
+
+  The API's body has always carried a question **per item**; `classify` is the case where they all
+  happen to be the same, and this library was collapsing the general case into that one. It matters
+  most when the answer space differs per row, because then there is nothing to group by and packing
+  has nothing to work with. Sixty-four rows each picking from their own set of labels: **64 requests
+  with `classify` called once a row, 2 with `judge`**. That is the pack depth, and it is the whole of
+  the library's benefit arriving for a workload that was getting none of it.
+
+  Anything an `Ask` leaves out falls back to what the call was given. Packing, deduplication, the
+  cache, the checkpoint and `triage` behave as they do for `classify`, with two differences: two rows
+  are duplicates only when the question matches as well as the text, and `guidance="once"` needs a pack
+  to be asking one thing before there is anything to hoist, so a mixed pack keeps its questions where
+  they are.
+
+### Changed
+- `classify`, `stream` and `judge` are one engine that carries a question per item. The saving from
+  v0.9.1 survives it: the question is serialised once per **distinct** question rather than once per
+  call, found by identity because the questions are copied once on the way in, so rows sharing one
+  share the object. A test holds that line at 64 rows and one serialisation.
+
+124 tests, no key and no network needed.
+
 ## v0.13.0 (2026-09-20)
 
 The 30,000 judgement benchmark was rerun with the arms alternating instead of one after the other.
