@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jev-ultralightspeed"
 version = "0.1.0"
-description = "A pile of text, one question about each: bulk classification with TypeSafe's Jev at 18x the throughput and 41% less money, same accuracy."
+description = "A pile of text, one question about each: bulk classification with TypeSafe's Jev at 16x the throughput and 41% less money, same accuracy."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

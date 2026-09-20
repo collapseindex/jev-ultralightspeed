@@ -2,7 +2,7 @@
 
 **v0.1.0** · Apache-2.0 · no required dependencies
 
-<img src="docs/infographic.png" alt="18x faster, 41% cheaper, same accuracy: 739 items a second against 41, and a million decisions in 14.7 minutes for $4.99" width="100%" />
+<img src="docs/infographic.png" alt="Faster, cheaper, same accuracy: hundreds of items a second against dozens, with agreement against human labels unchanged" width="100%" />
 
 **You have a pile of text and one question about each.** Fifty thousand support tickets to triage.
 A quarter of reviews to sort by sentiment. A month of logs to flag. A column to backfill on a table

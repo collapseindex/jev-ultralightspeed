@@ -8,8 +8,9 @@ First release.
 - One benchmark instead of three: 30,000 judgements over the same human-labelled completions,
   reported as 15.9x the throughput, 41% less money, 89.3% against 89.2% agreement with the labels,
   99.6% against 98.0% repeatability, 0 failed, 1 against 63 retried. `bench_eval.py` runs it.
-- The eval table reproduced on a third independent run (42.0, 280.8, 824.2 items/s at 89.1%, 90.1%,
-  90.7%, which is 19.6x), and 30,000 items at the default pack 8 (320 items/s, 0 retried).
+- Earlier, smaller runs over the same pod, kept for the record: 1,347 items gave 18x and 19.6x on
+  two occasions, at 89.2% against 90.6% and 89.1% against 90.7%. The headline now comes from the
+  30,000-judgement run above, which is one run, at scale, with every figure from the same arms.
 - `usage.retries`, so "no failures" is a number the client counted rather than the absence of a
   complaint. Both transports report it.
 - A million items in 14.7 minutes for $4.99, with none of the 31,400 requests failing or retried in
@@ -18,10 +19,9 @@ First release.
   generated from 99.79% of the time. `soak.py` reproduces it.
 - `Client.stream()`, which yields answers as they land and never holds more than a chunk, so a
   million rows costs the memory of five thousand.
-- Measured on dinostomp's xstest-refusal pod, 1,347 human-labelled completions: 18x the throughput
-  of one item at a time, 41% less money, agreement with the human labels unchanged (89.2% against
-  90.6%, overlapping intervals). Packing moves about 4% of individual verdicts, where two runs of
-  the same shape move 0.3%.
+- Measured on dinostomp's xstest-refusal pod: packing moves about 4% of individual verdicts against
+  0.3% between two runs of the same shape, which is the same finding the 30,000-judgement run
+  reports as repeatability, 99.6% against 98.0%.
 - An optional HTTP/2 transport (`pip install "jev-ultralightspeed[fast]"`): one event loop, one
   connection, every request in flight multiplexed over it, kept open between calls. About twice the
   threaded standard-library path, which remains the fallback.
