@@ -430,7 +430,7 @@ class Answering:
     way to test it the way a caller sees it.
     """
 
-    def __init__(self, delay=0.0, fail_after=None):
+    def __init__(self, delay=0.0, fail_after=None, drop_last=False):
         # Threading, and it has to be: keep-alive on a single-threaded server
         # serializes the workers, so the concurrency under test disappears and
         # the run deadlocks instead of failing.
@@ -455,8 +455,10 @@ class Answering:
                     time.sleep(delay)
                 if fail_after is not None and number > fail_after:
                     return self.answer(401, {"detail": "no"})
-                answers = {name: {"type": "noul", "noul": 0.8} for name in asked["state"]
-                           if name != "question"}
+                names = [name for name in asked["state"] if name.startswith("item_")]
+                if drop_last:
+                    names = names[:-1]                  # a payload one answer short
+                answers = {name: {"type": "noul", "noul": 0.8} for name in names}
                 self.answer(200, {"model": "jev-1.13.0", "answers": answers,
                                   "usage": {"input_tokens": 10, "output_tokens": 1}})
 
@@ -645,6 +647,22 @@ def test_a_finished_run_repeated_costs_nothing(transport, tmp_path):
     assert asked == 3, f"{asked} requests for a job that was already done"
     assert [(a.item, a.label, a.p) for a in first] == [(a.item, a.label, a.p) for a in second]
     assert len(records_in(book)) == 12
+
+
+@both_transports
+def test_a_short_payload_says_which_item_is_missing(transport):
+    """
+    The fast path reads payloads on the loop thread now. The error a caller sees
+    has to be the same one, and say the same thing.
+    """
+    server = Answering(drop_last=True)
+    client = a_real_client(server.url, transport, pack=4, workers=2)
+    try:
+        with pytest.raises(JevError, match="did not answer item_4"):
+            client.classify([f"item {n}" for n in range(4)], QUESTION)
+    finally:
+        client.close()
+        server.close()
 
 
 def test_a_checkpoint_is_per_question(tmp_path):

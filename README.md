@@ -269,7 +269,7 @@ buffer, and a torn final line is repaired on the next open.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 52 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 54 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents

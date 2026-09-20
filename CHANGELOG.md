@@ -32,7 +32,9 @@ the first release, and until now a job of a million rows that died at row 800,00
 - A checkpoint line torn mid-digest by a hard kill produced a short key that looked like a perfectly
   good one for an item nobody had asked about. Found by its own test.
 
-52 tests, still no key and no network needed.
+54 tests, still no key and no network needed. One of the new ones checks that a payload one
+answer short names the missing item identically on both transports, since reading moved to the
+thread each request lands on.
 
 ## v0.3.2 (2026-09-20)
 
