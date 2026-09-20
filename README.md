@@ -16,111 +16,62 @@ answers = classify(tickets, "Does this message need a human to act on it today?"
 urgent = [a.item for a in answers if a.yes]
 ```
 
-**A million decisions in 14.7 minutes for $4.99, and not one request failed.** One request per item,
-one at a time, would take about 41 hours and cost three times as much.
+**15.9x the throughput of one request per item, 41% less money, and the same accuracy.** Measured
+over 30,000 judgements against human labels, in one run, with a script in this repository.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
 
 Not affiliated with TypeSafe; the hedgehog is a parody and belongs to nobody.
 
-## A million items
+## The benchmark
 
-One question, a million support messages, answers streamed straight to a CSV.
+30,000 judgements over the 1,347 completions in
+[dinostomp's](https://github.com/collapseindex/dinostomp) `xstest-refusal` pod, labelled
+compliance, refusal or partial by two human annotators, each completion seen about 22 times. Two
+arms, identical but for the shape of the requests. This is not Jev against another model: it is
+**jev-1.13.0 against itself**, same question, same items, same criteria.
 
-| | |
-| --- | --- |
-| items | 1,000,000 |
-| time | 14.7 minutes |
-| throughput | 1,134.8 items/s, flat to within 1 item/s over the last 160,000 |
-| requests | 31,400, instead of 1,000,000 |
-| tokens | 138 per item |
-| cost | **$4.99**, confirmed against the account balance to the cent |
-| failures | 0 of 31,400 requests, in this run |
-| memory | flat: answers stream out, nothing accumulates |
+| | regular jev | jev + ultralightspeed |
+| --- | ---: | ---: |
+| throughput | 41.1 items/s | **653.4 items/s** |
+| wall clock | 12 min 11 s | **46 seconds** |
+| requests | 30,000 | 942 |
+| cost | $0.729 | **$0.430** |
+| agreement with the human labels | 89.3% (89.0 to 89.7) | **89.2% (88.9 to 89.6)** |
+| same answer across an item's repeats | 99.6% | 98.0% |
+| failed | 0 | 0 |
+| retried | 1 | 63 |
 
-```bash
-TYPESAFE_API_KEY=... python soak.py --items 1000000 --out answers.csv
-```
-
-Nothing was retried, no rate limit was hit, and the throughput did not sag over a quarter of an hour
-of sustained load. To be exact about what that claim covers: it is one run of 31,400 requests, not
-an average over repeated runs, and a later 50,000-item run reported the same, 1,570 requests and 0
-retried. The client counts retries in `usage.retries`, so anyone can check their own. The comparison in the first line, 41 hours and $15.70, is arithmetic on the
-measured sequential rate further down (6.8 items/s, 375 tokens an item), not a run anybody sat
-through.
-
-That run is a throughput and stability test: the messages are generated, so there are no human
-labels in it. What it can say about answers is that they agreed with the template each message was
-generated from **99.79%** of the time, and that none of the 2,091 disagreements came with a
-probability above 0.9, and that they were almost all one template: *"We were charged N times for the {plan} plan this morning"*, which Jev
-often read as billing to sort out rather than something needing a person today. That is a fair
-reading, and it is my label that is arguable. For accuracy against labels a human wrote, see the
-next section.
-
-## Same accuracy: measured on a real eval
-
-1,347 completions from [XSTest](https://github.com/paul-rottger/exaggerated-safety), labelled
-compliance, refusal or partial by two human annotators, as packaged in
-[dinostomp's](https://github.com/collapseindex/dinostomp) `xstest-refusal` pod. The judge is Jev,
-asked the same three-way question every time. Only the shape of the requests changes.
-
-The baseline here is not a slow loop: it is one item per request with the same eight requests in
-flight, so the 18x is against a client that is already parallel. Against an actual sequential loop
-it is far larger, and far less interesting.
-
-| | items/s | requests | tokens/item | cost | agreement with the humans | 95% interval |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| jev, one request per item | 41.1 | 1,347 | 613 | $0.0322 | 89.2% | 87.5 to 90.8 |
-| **jev + ultralightspeed, pack 8** | **270.9** | 169 | 396 | $0.0200 | 90.0% | 88.3 to 91.5 |
-| **jev + ultralightspeed, pack 32** | **739.2** | 43 | 374 | $0.0188 | 90.6% | 89.0 to 92.1 |
-
-This is not Jev against some other model. It is **jev-1.13.0 against itself**: same model, same
-question, same items, same criteria. The only thing that changes is how this client shapes the
-requests.
-
-Run again a day later, the table came back 42.0, 280.8 and 824.2 items/s at 89.1%, 90.1% and 90.7%,
-which is 19.6x. The 18x above is the slower of the two runs, kept because quoting your best number
-is how benchmarks stop being believed.
-
-The three intervals overlap, so the judge is as good packed as it is one item at a time.
-
-One thing worth knowing rather than discovering later. Packing changes which individual items get
-which label, even though the total does not move: about 4% of verdicts differ between a packed run
-and an unpacked one, against 0.3% between two runs of the same shape. So pack freely when you want
-the aggregate, and keep the pack size fixed when you are comparing item by item across runs.
-
-So: 18x the throughput of an already parallel baseline, 41% less money, and the score against the
-human labels does not move.
-
-## Measured on synthetic items
-
-256 support messages, one yes-or-no question each, three rounds per shape, shapes run in a random
-order, connections warmed first. `agreement` compares every answer with the one-at-a-time baseline.
-
-| shape | items/s | requests | tokens/item | p50 | p95 | $ per 1k items | agreement |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| sequential | 6.8 | 256 | 375 | 140 ms | 218 ms | 0.0157 | baseline |
-| concurrent x8 | 42.3 | 256 | 375 | 181 ms | 284 ms | 0.0157 | 100.0% same |
-| concurrent x16 | 78.9 | 256 | 375 | 196 ms | 291 ms | 0.0157 | 100.0% same |
-| packed 4 x4 | 99.0 | 64 | 189 | 150 ms | 234 ms | 0.0079 | 100.0% same |
-| packed 8 x4 | 182.1 | 32 | 156 | 152 ms | 233 ms | 0.0066 | 99.6% same |
-| packed 8 x8 | 338.4 | 32 | 156 | 169 ms | 286 ms | 0.0066 | 99.9% same |
-| packed 16 x8 | 527.4 | 16 | 141 | 180 ms | 302 ms | 0.0059 | 99.6% same |
-| **packed 32 x8** | **896.5** | 8 | 134 | 239 ms | 281 ms | 0.0056 | 99.2% same |
-
-Short items make packing look even better, because the per-item text is a smaller share of each
-request. Reproduce it on your own key, it costs about five cents:
+**15.9x the throughput, 41% less money, and the accuracy is the same**: 89.3% against 89.2%, with
+30,000 judgements behind each figure and the intervals sitting on top of each other.
 
 ```bash
-TYPESAFE_API_KEY=... python bench.py --items 256 --rounds 3
-TYPESAFE_API_KEY=... python bench.py --grid              # sweep pack x concurrency
-TYPESAFE_API_KEY=... python bench.py --transport threads # without httpx, for comparison
+pip install "jev-ultralightspeed[fast]"
+git clone https://github.com/collapseindex/dinostomp.git ../dinostomp
+TYPESAFE_API_KEY=... python bench_eval.py            # about 13 minutes, about $1.20
 ```
 
-Throughput buys latency: a packed request of 32 items takes 239 ms at the median against 140 ms for
-one, so the last row is for a queue of a million rows, not for something a person is waiting on. If
-you are classifying one item as it arrives, do not use this at all: call the API.
+Three things in that table are worth reading twice.
+
+**The baseline is not slow.** It is one item per request with the same eight requests in flight, so
+the 15.9x is against a client that is already parallel. Against an actual sequential loop it is far
+larger and far less interesting.
+
+**Sixty-three retries, and nothing failed.** Packing 32 deep with 8 in flight does hit transient
+limits at volume. The client backs off and sends them again, which is why this arm came in at 653
+items/s rather than the 800 it reaches on short bursts. Retries are counted in `usage.retries`, so
+this is a number rather than an absence of complaints.
+
+**Aggregate accuracy is identical; individual answers are slightly less repeatable.** Ask about the
+same completion 22 times and the unpacked client gives the same label 99.6% of the time, the packed
+one 98.0%. So pack freely when you want the total, and keep the pack size fixed when you are
+comparing item by item across runs.
+
+Shorter items do better than this on every axis, because the per-item text is a smaller share of
+each request: a million synthetic support messages (138 tokens each) ran at 1,135 items/s, 14.7
+minutes and $4.99 for the lot, over 31,400 requests with nothing retried. `soak.py --items 1000000`
+reproduces that, and it is a different corpus, so it is a footnote here rather than a headline.
 
 ## How
 
@@ -186,7 +137,7 @@ the order you passed the items in, however the requests were shuffled to get the
 
 | argument | default | what it does |
 | --- | --- | --- |
-| `pack` | 8 | items per request. Higher is faster and cheaper, and slower per request. Measured on 30,000 items: pack 8 does 320 items/s at $5.95 a million, pack 32 does 1,130 at $4.99. |
+| `pack` | 8 | items per request. Higher is faster and cheaper, and slower per request. On short items: pack 8 does 320 items/s, pack 32 does 1,130. |
 | `workers` | 4 | requests in flight. |
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
@@ -211,6 +162,10 @@ the order you passed the items in, however the requests were shuffled to get the
 ```bash
 pip install pytest
 python -m pytest tests -q        # 21 tests, no network, no key needed
+
+TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~13 min, ~$1.20
+TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
+TYPESAFE_API_KEY=... python soak.py --items 100000   # sustained load, ~50 cents
 ```
 
 The tests replace the one method that talks to the API, so the packing, the deduplication, the cache,

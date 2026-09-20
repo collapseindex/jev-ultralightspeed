@@ -5,6 +5,9 @@
 First release.
 
 ### Added
+- One benchmark instead of three: 30,000 judgements over the same human-labelled completions,
+  reported as 15.9x the throughput, 41% less money, 89.3% against 89.2% agreement with the labels,
+  99.6% against 98.0% repeatability, 0 failed, 1 against 63 retried. `bench_eval.py` runs it.
 - The eval table reproduced on a third independent run (42.0, 280.8, 824.2 items/s at 89.1%, 90.1%,
   90.7%, which is 19.6x), and 30,000 items at the default pack 8 (320 items/s, 0 retried).
 - `usage.retries`, so "no failures" is a number the client counted rather than the absence of a
