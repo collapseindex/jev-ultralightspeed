@@ -81,7 +81,8 @@ class Usage:
     """What a run cost, so a claim about speed can be checked."""
 
     items: int = 0
-    requests: int = 0
+    requests: int = 0            # requests that came back with an answer
+    retries: int = 0             # attempts that failed and were sent again
     input_tokens: int = 0
     output_tokens: int = 0
     cached: int = 0
@@ -102,8 +103,9 @@ class Usage:
         return self.input_tokens * self.USD_PER_MILLION_INPUT / 1e6
 
     def __str__(self) -> str:
+        retried = f", {self.retries} retried" if self.retries else ""
         return (f"{self.items} items in {self.seconds:.2f}s "
-                f"({self.items_per_second:.1f}/s, {self.requests} requests, "
+                f"({self.items_per_second:.1f}/s, {self.requests} requests{retried}, "
                 f"{self.tokens_per_item:.0f} tokens/item, ${self.usd:.5f})")
 
 
@@ -213,10 +215,12 @@ class Client:
                 if answer.status not in RETRY_STATUSES or attempt == MAX_RETRIES - 1:
                     raise JevError(f"Jev answered {answer.status}: "
                                    f"{payload.decode('utf-8', 'replace')[:300]}")
+                self.usage.retries += 1
             except (http.client.HTTPException, socket.error, ssl.SSLError, TimeoutError) as error:
                 self._drop_connection()
                 if attempt == MAX_RETRIES - 1:
                     raise JevError(f"could not reach Jev: {error}") from error
+                self.usage.retries += 1
             time.sleep(min(30.0, 2 ** attempt))
         raise JevError("out of retries")
 
@@ -328,7 +332,8 @@ class Client:
             bodies = [self._body([texts[i] for i in g], instructions, criteria, options)
                       for g in groups]
             payloads = self._pipe_for().ask_all(
-                bodies, on_request=self._count, on_timing=self.latencies.append)
+                bodies, on_request=self._count, on_timing=self.latencies.append,
+                on_retry=lambda: setattr(self.usage, 'retries', self.usage.retries + 1))
             for group, data in zip(groups, payloads):
                 for position, index in enumerate(group, start=1):
                     answer = _read(self._entry(data, position), texts[index])

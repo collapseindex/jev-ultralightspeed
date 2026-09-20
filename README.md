@@ -16,8 +16,8 @@ answers = classify(tickets, "Does this message need a human to act on it today?"
 urgent = [a.item for a in answers if a.yes]
 ```
 
-**A million decisions in 14.7 minutes for $4.99, with zero errors.** One request per item, one at a
-time, would take about 41 hours and cost three times as much.
+**A million decisions in 14.7 minutes for $4.99, and not one request failed.** One request per item,
+one at a time, would take about 41 hours and cost three times as much.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
@@ -36,7 +36,7 @@ One question, a million support messages, answers streamed straight to a CSV.
 | requests | 31,400, instead of 1,000,000 |
 | tokens | 138 per item |
 | cost | **$4.99**, confirmed against the account balance to the cent |
-| failures | 0 |
+| failures | 0 of 31,400 requests, in this run |
 | memory | flat: answers stream out, nothing accumulates |
 
 ```bash
@@ -44,7 +44,9 @@ TYPESAFE_API_KEY=... python soak.py --items 1000000 --out answers.csv
 ```
 
 Nothing was retried, no rate limit was hit, and the throughput did not sag over a quarter of an hour
-of sustained load. The comparison in the first line, 41 hours and $15.70, is arithmetic on the
+of sustained load. To be exact about what that claim covers: it is one run of 31,400 requests, not
+an average over repeated runs, and a later 50,000-item run reported the same, 1,570 requests and 0
+retried. The client counts retries in `usage.retries`, so anyone can check their own. The comparison in the first line, 41 hours and $15.70, is arithmetic on the
 measured sequential rate further down (6.8 items/s, 375 tokens an item), not a run anybody sat
 through.
 

@@ -5,7 +5,10 @@
 First release.
 
 ### Added
-- A million items in 14.7 minutes for $4.99 with no failures, streamed to a CSV: 1,134.8 items/s
+- `usage.retries`, so "no failures" is a number the client counted rather than the absence of a
+  complaint. Both transports report it.
+- A million items in 14.7 minutes for $4.99, with none of the 31,400 requests failing or retried in
+  that run, streamed to a CSV: 1,134.8 items/s
   over 31,400 requests, holding flat for the whole run, agreeing with the template each message was
   generated from 99.79% of the time. `soak.py` reproduces it.
 - `Client.stream()`, which yields answers as they land and never holds more than a chunk, so a

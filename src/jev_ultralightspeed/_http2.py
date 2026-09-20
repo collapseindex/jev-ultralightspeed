@@ -78,7 +78,7 @@ class Pipe:
         self._ready.set()
         self._loop.run_forever()
 
-    async def _one(self, body: dict, on_request, on_timing) -> dict:
+    async def _one(self, body: dict, on_request, on_timing, on_retry) -> dict:
         from . import JevError
 
         async with self._gate:
@@ -95,23 +95,27 @@ class Pipe:
                         return data
                     if answer.status_code not in self.retry_statuses or attempt == self.max_retries - 1:
                         raise JevError(f"Jev answered {answer.status_code}: {answer.text[:300]}")
+                    if on_retry:
+                        on_retry()
                 except httpx.HTTPError as error:
                     if on_timing:
                         on_timing((time.monotonic() - started) * 1000)
                     if attempt == self.max_retries - 1:
                         raise JevError(f"could not reach Jev: {error}") from error
+                    if on_retry:
+                        on_retry()
                 await asyncio.sleep(min(30.0, 2 ** attempt))
             raise JevError("out of retries")
 
-    async def _all(self, bodies, on_request, on_timing) -> list[dict]:
-        return list(await asyncio.gather(*(self._one(body, on_request, on_timing)
+    async def _all(self, bodies, on_request, on_timing, on_retry) -> list[dict]:
+        return list(await asyncio.gather(*(self._one(body, on_request, on_timing, on_retry)
                                            for body in bodies)))
 
     # -- from ordinary code ------------------------------------------------
     def ask_all(self, bodies: Sequence[dict], *, on_request: Callable | None = None,
-                on_timing: Callable | None = None) -> list[dict]:
+                on_timing: Callable | None = None, on_retry: Callable | None = None) -> list[dict]:
         future = asyncio.run_coroutine_threadsafe(
-            self._all(bodies, on_request, on_timing), self._loop)
+            self._all(bodies, on_request, on_timing, on_retry), self._loop)
         return future.result()
 
     def warm(self) -> None:

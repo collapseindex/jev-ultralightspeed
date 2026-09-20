@@ -115,7 +115,8 @@ def main() -> int:
 
     seconds = time.monotonic() - started
     print(f"\n{done:,} items in {seconds / 60:.1f} min at {done / seconds:.1f} items/s")
-    print(f"{client.usage.requests:,} requests, {client.usage.tokens_per_item:.0f} tokens/item, "
+    print(f"{client.usage.requests:,} requests, {client.usage.retries:,} retried, "
+          f"{client.usage.tokens_per_item:.0f} tokens/item, "
           f"${client.usage.usd:.2f} total, ${client.usage.usd / done * 1e6:.2f} per million items")
     print(f"labels: {dict(counts)}")
     if arguments.out:
