@@ -178,8 +178,13 @@ def triage(answers: Sequence[Answer], *, keep: float | None = None,
     a skipped answer is always one to look at.
 
     Where to cut is a property of your question and your items, not of this
-    library, so measure it on a few hundred labelled rows of your own.
-    `bench_confidence.py` is that measurement.
+    library. Measured on three corpora the cut that keeps four fifths was 0.92,
+    0.77 and 0.95, and the miscalibration changed sign between them, so there is
+    no number here to copy. `calibrate` finds yours from a few hundred labelled
+    rows and hands back the one to pass here:
+
+        cal = calibrate(rows, labels, question, accuracy=0.95)
+        trusted, review = triage(answers, at_least=cal.cut)
     """
     if (keep is None) == (at_least is None):
         raise JevError("say one of keep or at_least, not both and not neither")

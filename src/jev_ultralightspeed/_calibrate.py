@@ -1,0 +1,278 @@
+"""
+Finding the cut, on your own labelled rows.
+
+`triage` needs a number and this library cannot tell you what it is. Measured on
+three corpora the cut that keeps four fifths was 0.92, 0.77 and 0.95, and the
+direction of the miscalibration flipped between them, so there is nothing here to
+carry across. What does carry across is the method, and that is what this is: an
+hour of somebody's afternoon turned into one call over a few hundred rows you
+already have labels for.
+
+    cal = calibrate(rows, labels, "Does this need a human?", accuracy=0.95)
+    print(cal)
+    trusted, review = triage(answers, at_least=cal.cut)
+
+Two things it does that doing it by hand usually does not.
+
+The cut is chosen on all of your rows, because that is the one you are going to
+deploy and it should see everything. What to *expect* from it is measured on rows
+it was not chosen on, over many random splits, because a threshold scored against
+the data that picked it is not a measurement. Those are different questions and
+this keeps them apart.
+
+And it says when not to believe it. Too few rows, a judge so sure of everything
+that the ranking has no resolution left, a target nothing reaches: all of those
+come back as notes rather than as a confident number.
+"""
+
+from __future__ import annotations
+
+import random
+import statistics
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from ._answers import Answer
+from ._errors import JevError
+
+# Below this many labelled rows the held-out halves are too small to say much,
+# and the interval will show it, but a note is more honest than a wide bar.
+FEW = 200
+# The smallest slice a cut may be fitted to. A prefix of five items is 100% right
+# often enough to fool a search that is looking for 95%.
+FLOOR = 30
+SPLITS = 20
+SEED = 7
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """
+    A cut, and how much to believe it.
+
+    `cut` is the number to hand to `triage(at_least=...)`. `coverage` and
+    `accuracy` are what it did on rows it was not chosen on; `low` and `high` are
+    the middle 90% of that across the splits, so they are the honest width of the
+    estimate. `baseline` is the agreement with no cut at all, which is what the
+    cut has to beat to be worth anything.
+    """
+
+    cut: float
+    coverage: float
+    accuracy: float
+    low: float
+    high: float
+    baseline: float
+    items: int
+    splits: int
+    notes: tuple[str, ...] = ()
+
+    @property
+    def gain(self) -> float:
+        """Points of agreement the cut buys over not cutting."""
+        return self.accuracy - self.baseline
+
+    def __str__(self) -> str:
+        lines = [
+            f"cut {self.cut:.3f}, keeping {self.coverage:.0%} at {self.accuracy:.1%} agreement",
+            f"  without a cut           {self.baseline:>6.1%}",
+            f"  with it                 {self.accuracy:>6.1%}  ({self.gain * 100:+.1f} points)",
+            f"  over {self.splits} held-out splits  {self.low:.1%} to {self.high:.1%}",
+            f"  measured on {self.items:,} labelled rows",
+        ]
+        lines += [f"  note: {note}" for note in self.notes]
+        return "\n".join(lines)
+
+    @classmethod
+    def from_answers(cls, answers: Sequence[Answer], gold: Sequence[str], *,
+                     keep: float | None = None, accuracy: float | None = None,
+                     splits: int = SPLITS, seed: int = SEED) -> Calibration:
+        """
+        The same thing on answers you already have, which costs nothing.
+
+        Use this to re-cut a finished run at a different target, or to calibrate
+        without asking twice.
+        """
+        return _work(list(answers), list(gold), keep, accuracy, splits, seed)
+
+
+def calibrate(items: Sequence[str], gold: Sequence[str], instructions: str, *,
+              keep: float | None = None, accuracy: float | None = None,
+              criteria: dict | None = None, options: dict | None = None,
+              levels: Sequence[str] | None = None,
+              client=None, splits: int = SPLITS, seed: int = SEED) -> Calibration:
+    """
+    Ask the judge about labelled rows, then find the cut worth trusting.
+
+        cal = calibrate(rows, labels, "Is this urgent?", accuracy=0.95)
+        cal = calibrate(rows, labels, "Which team?", options=teams, keep=0.8)
+
+    `gold` is what each row should have come back as, in the same order: "yes" or
+    "no" for a yes/no question, the option key for a pick-one, the level for a
+    score. Say one of `keep` (how much you want to automate) or `accuracy` (how
+    right it has to be), not both.
+
+    A few hundred rows is enough and the call costs cents. Pass a `client` to
+    control packing or the key; otherwise a default one is made and closed here.
+
+    What comes back is a `Calibration`. Print it before using it: it carries the
+    width of its own estimate and the reasons not to trust it, if there are any.
+    """
+    if len(items) != len(gold):
+        raise JevError(f"{len(items)} items and {len(gold)} labels; they have to line up")
+
+    from ._client import Client
+
+    own = client is None
+    client = client or Client()
+    try:
+        answers = client.classify(list(items), instructions, criteria=criteria,
+                                  options=options, levels=levels)
+    finally:
+        if own:
+            client.close()
+    return _work(answers, list(gold), keep, accuracy, splits, seed)
+
+
+# -- the arithmetic ----------------------------------------------------------
+
+def _scored(answers: Sequence[Answer], gold: Sequence[str]) -> list[tuple[float, float]]:
+    """(certainty, 1 if right else 0) for every answer that came back at all."""
+    if len(answers) != len(gold):
+        raise JevError(f"{len(answers)} answers and {len(gold)} labels; they have to line up")
+    return [(answer.certainty, 1.0 if answer.label == want else 0.0)
+            for answer, want in zip(answers, gold, strict=True) if answer.ok]
+
+
+def _cut_for_keep(rows: list[tuple[float, float]], keep: float) -> float:
+    """The certainty at which `keep` of these rows sits at or above it."""
+    ranked = sorted((certainty for certainty, _ in rows), reverse=True)
+    return ranked[min(len(ranked) - 1, max(0, int(len(ranked) * keep) - 1))]
+
+
+def _cut_for_accuracy(rows: list[tuple[float, float]], target: float) -> float | None:
+    """
+    The lowest cut that still reaches `target`, so the most rows kept.
+
+    Walking prefixes of the ranking and remembering the longest one that clears
+    the bar. Accuracy over a prefix is not monotonic, so this takes the largest
+    that qualifies rather than stopping at the first that fails. Prefixes shorter
+    than FLOOR are not eligible: a handful of the judge's surest answers are all
+    correct often enough to look like any target you ask for.
+    """
+    ranked = sorted(rows, key=lambda row: -row[0])
+    right = 0.0
+    best: float | None = None
+    for taken, (certainty, correct) in enumerate(ranked, start=1):
+        right += correct
+        if taken >= FLOOR and right / taken >= target:
+            best = certainty
+    return best
+
+
+def _at(rows: list[tuple[float, float]], cut: float) -> tuple[float, float]:
+    """Coverage and accuracy over everything at or above `cut`, as triage would."""
+    kept = [correct for certainty, correct in rows if certainty >= cut]
+    if not kept:
+        return 0.0, 0.0
+    return len(kept) / len(rows), statistics.mean(kept)
+
+
+def _work(answers: list[Answer], gold: list[str], keep: float | None,
+          accuracy: float | None, splits: int, seed: int) -> Calibration:
+    if (keep is None) == (accuracy is None):
+        raise JevError("say one of keep or accuracy, not both and not neither")
+    for name, value in (("keep", keep), ("accuracy", accuracy)):
+        if value is not None and not 0.0 < value <= 1.0:
+            raise JevError(f"{name} is a fraction above 0 and up to 1")
+
+    rows = _scored(answers, gold)
+    if len(rows) < FLOOR:
+        raise JevError(f"{len(rows)} usable answers is too few to find a cut in; "
+                       f"{FEW} labelled rows is a sensible floor and {FLOOR} is the hard one")
+
+    notes: list[str] = []
+    skipped = len(answers) - len(rows)
+    if skipped:
+        notes.append(f"{skipped} answers came back unusable and are not in this; "
+                     f"triage always puts those in the review pile")
+    if len(rows) < FEW:
+        notes.append(f"{len(rows)} rows is thin. The interval below is the width of that, "
+                     f"and {FEW} or more would narrow it")
+
+    baseline = statistics.mean(correct for _c, correct in rows)
+
+    # The cut to deploy is fitted on everything, because that is the one that has
+    # seen the most of your data.
+    if keep is not None:
+        cut = _cut_for_keep(rows, keep)
+    else:
+        found = _cut_for_accuracy(rows, accuracy)
+        if found is None:
+            best = max((_at(rows, certainty)[1] for certainty, _ in rows), default=0.0)
+            raise JevError(
+                f"no cut reaches {accuracy:.0%} on these rows; the best any of them manages "
+                f"over at least {FLOOR} kept is {best:.1%}. Ask for less, or the judge is not "
+                f"good enough at this question to be trusted at that bar")
+        cut = found
+
+    # What to expect from it is measured on rows it was not chosen on, many times,
+    # because one split of a few hundred rows is mostly luck.
+    shaker = random.Random(seed)
+    coverages, scores = [], []
+    order = list(range(len(rows)))
+    for _ in range(max(1, splits)):
+        shaker.shuffle(order)
+        half = len(order) // 2
+        fit = [rows[index] for index in order[:half]]
+        test = [rows[index] for index in order[half:]]
+        if keep is not None:
+            edge = _cut_for_keep(fit, keep)
+        else:
+            edge = _cut_for_accuracy(fit, accuracy)
+            if edge is None:
+                continue
+        covered, scored = _at(test, edge)
+        if covered:
+            coverages.append(covered)
+            scores.append(scored)
+
+    if not scores:                       # every split failed to find a cut
+        notes.append("no held-out split could find this cut, so there is no estimate "
+                     "of what it does on rows it has not seen")
+        return Calibration(cut, *_at(rows, cut), 0.0, 0.0, baseline,
+                           len(rows), 0, tuple(notes))
+
+    scores.sort()
+    edge = max(0, int(len(scores) * 0.05) - 1) if len(scores) >= 20 else 0
+    low, high = scores[edge], scores[len(scores) - 1 - edge]
+
+    # A judge that is sure of nearly everything leaves the ranking nothing to
+    # sort by, and the coverage it settles on then has little to do with what was
+    # asked for. Seen on AG News, where four judgements in five come back at 1.000.
+    top = max(certainty for certainty, _ in rows)
+    tied = sum(1 for certainty, _ in rows if certainty >= top) / len(rows)
+    if tied > 0.5:
+        notes.append(f"{tied:.0%} of the answers tie at {top:.3f}, so no cut can keep less "
+                     f"than that and the ranking has little left to sort")
+    if baseline >= (accuracy or 0.0) and accuracy is not None:
+        notes.append(f"the judge already agrees {baseline:.1%} of the time without any cut, "
+                     f"so you may not need one")
+    # The cut was fitted on every row and is then being asked about rows it has
+    # not seen, so it flatters itself. Saying by how much is the whole reason the
+    # held-out halves are here, and quietly handing back a number under the one
+    # that was asked for would waste them.
+    got = statistics.median(scores)
+    if accuracy is not None and got < accuracy:
+        notes.append(f"you asked for {accuracy:.1%} and rows the cut had not seen came in at "
+                     f"{got:.1%}. Fitting on everything flatters the cut by about that much, "
+                     f"so the held-out figure is the one to plan with")
+    held = statistics.median(coverages)
+    if accuracy is not None and held < 0.25:
+        notes.append(f"that bar is only reachable on {held:.0%} of the rows, so most of the "
+                     f"pile still goes to a person. A lower one buys back a lot of coverage")
+
+    return Calibration(cut=cut, coverage=statistics.median(coverages),
+                       accuracy=statistics.median(scores), low=low, high=high,
+                       baseline=baseline, items=len(rows), splits=len(scores),
+                       notes=tuple(notes))

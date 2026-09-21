@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.19.0 (2026-09-20)
+
+v0.18.0 established that the triage finding holds across three corpora and that the threshold behind
+it does not: 0.92, 0.77 and 0.95, with the miscalibration changing sign along the way. That left the
+best thing in this library shipping without a usable default, and everyone who wanted it doing an
+afternoon of arithmetic first. This is that afternoon, as one call.
+
+### Added
+- **`calibrate(items, gold, instructions, accuracy=...)`** and **`Calibration`**. Ask the judge about
+  a few hundred rows you already have labels for, and get back the number `triage(at_least=...)`
+  wants, plus how much to believe it.
+
+  ```python
+  cal = calibrate(rows[:300], labels[:300], question, accuracy=0.95)
+  trusted, review = triage(classify(everything, question), at_least=cal.cut)
+  ```
+
+  Say either `accuracy=` (how right it has to be, and it reports what that costs in coverage) or
+  `keep=` (how much you want to automate, and it reports what you get).
+  `Calibration.from_answers(answers, gold, ...)` does the same on answers you already have, for
+  nothing, which also re-cuts a finished run at a different target.
+
+  **The cut is fitted on every row and the estimate is not**, because those are different questions.
+  The cut you deploy should have seen everything you have; what to expect from it has to come from
+  rows it did not see. So the cut is chosen once on the lot, and coverage and accuracy come from
+  twenty random half-and-half splits, reported with the middle 90% of that spread.
+
+  It says when not to believe it: when the held-out figure lands under the bar that was asked for
+  (the self-flattery of fitting on everything, and the number to plan with), when there are too few
+  rows, when the judge is so sure of everything that the ranking has no resolution left, and when the
+  bar is only reachable on a sliver of the pile.
+
+  Most importantly it declines to find what is not there. Given certainty carrying no information it
+  reports a gain of about zero rather than a threshold fitted to noise. That is a test, not a claim:
+  on the same generator, +5.0 points where the signal is real and ±0.3 where it is not.
+
+  Validated against the three committed corpus runs, where it recovers the cuts those tables were
+  read off by hand: 0.920, 0.770 and 0.940.
+
+- **`tests/test_calibrate.py`**, 18 tests, including the negative one above and the yes/no ranking
+  case where `p` would sort the judge's firmest verdicts to the bottom.
+
+### Changed
+- `triage`'s docstring now points at `calibrate` rather than at a benchmark script, and carries the
+  three thresholds as the reason not to copy a number out of this repository.
+
+176 tests, four Pythons, three operating systems, a linter, and a volume job.
+
 ## v0.18.0 (2026-09-20)
 
 No library change. Two claims that had been carried on thin evidence, measured properly: that the

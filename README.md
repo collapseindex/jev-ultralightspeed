@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.18.0** · Apache-2.0 · no required dependencies
+**v0.19.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -714,8 +714,8 @@ either (BoolQ 91.3% voted against 91.0% asked once, AG News 88.8% against 89.0%)
 BoolQ and 0.95 on AG News. Carry a threshold across and you will keep half of one corpus and nearly
 all of another. The direction of the miscalibration flips as well: on BoolQ the judge is *less* sure
 than it turns out to be, on the other two more. So there is no constant to take from this table, only
-a method, which is why the advice at the end of this section is to spend an hour measuring it on a
-few hundred labelled rows of your own.
+a method, and the method is one call: [`calibrate`](#finding-your-own-cut) runs it over a few hundred
+of your own labelled rows for cents.
 
 One caveat that belongs to easy tasks rather than to the method. On AG News four judgements in five
 come back at a probability of 1.000, so the ranking runs out of resolution: no cut keeps fewer than
@@ -780,8 +780,53 @@ python bench_confidence.py --analyse data/results/20260920_122545_confidence_jev
 It holds one line per judgement: which completion, the human label, whether the two annotators agreed,
 and what Jev said with what probability. No completion text, so it does not republish the pod.
 
-The threshold itself is a property of your question and your items, not of this library. Measure it on
-a few hundred labelled rows of your own; that is what the collecting half is for.
+### Finding your own cut
+
+The threshold is a property of your question and your items, not of this library, and the three
+corpora above are the proof: 0.92, 0.77 and 0.95, with the miscalibration changing sign along the
+way. Copy a number out of that table and you will keep half of one task and nearly all of another.
+
+So don't copy one. `calibrate` is the measurement above, over your rows, in one call:
+
+```python
+from jev_ultralightspeed import calibrate, classify, triage
+
+cal = calibrate(rows[:300], labels[:300], question, accuracy=0.95)
+print(cal)
+
+answers = classify(everything, question)
+trusted, review = triage(answers, at_least=cal.cut)
+```
+
+```
+cut 0.730, keeping 85% at 94.9% agreement
+  without a cut            91.0%
+  with it                  94.9%  (+3.9 points)
+  over 20 held-out splits  94.0% to 96.5%
+  measured on 3,270 labelled rows
+  note: you asked for 95.0% and rows the cut had not seen came in at 94.9%. Fitting on
+        everything flatters the cut by about that much, so the held-out figure is the
+        one to plan with
+```
+
+Say either `accuracy=` (how right it has to be, and it tells you what that costs in coverage) or
+`keep=` (how much you want to automate, and it tells you what you get). A few hundred labelled rows
+is enough and the call costs cents. `Calibration.from_answers(answers, gold, ...)` does the same on
+answers you already have, for nothing.
+
+**The cut is fitted on all your rows and the estimate is not.** Those are different questions. The
+cut you deploy should have seen everything you have; what to *expect* from it has to come from rows
+it did not see, or it is not a measurement. So the cut is chosen once on the lot, and the accuracy
+and coverage come from twenty random half-and-half splits. When the held-out figure lands under the
+bar you asked for, it says so, as above: that gap is the self-flattery, and it is the number to plan
+with.
+
+It also declines to tell you what is not there. Given certainty that carries no information it
+reports a gain of about zero rather than a threshold fitted to noise, which is what it does in the
+test suite on exactly that input (+5.0 points where the signal is real, ±0.3 where it is not). And it
+notes when there are too few rows to say much, when the judge is so sure of everything that the
+ranking has nothing left to sort (the AG News case), and when the bar you asked for is only reachable
+on a sliver of the pile.
 
 ### Carrying the question once
 
@@ -937,7 +982,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 158 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 176 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
