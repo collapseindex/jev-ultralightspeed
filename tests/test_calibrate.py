@@ -18,7 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from jev_ultralightspeed import Answer, Calibration, JevError, calibrate  # noqa: E402
+from jev_ultralightspeed import (  # noqa: E402
+    Answer,
+    Calibration,
+    JevError,
+    calibrate,
+    discrimination,
+)
 
 
 def a_judge(count: int, *, honest: bool, seed: int = 1, kind: str = "choice"):
@@ -40,6 +46,67 @@ def a_judge(count: int, *, honest: bool, seed: int = 1, kind: str = "choice"):
     return answers, gold
 
 
+def test_discrimination_knows_perfect_separation_from_none():
+    """The two ends of the scale, so the middle means something."""
+    perfect = ([Answer(item="", p=0.9, label="a", kind="choice") for _ in range(50)]
+               + [Answer(item="", p=0.1, label="b", kind="choice") for _ in range(50)])
+    assert discrimination(perfect, ["a"] * 100) == 1.0
+
+    # Every answer carries the same certainty, so it cannot rank anything. Ties
+    # share an averaged rank, which is what keeps this at a coin flip instead of
+    # rewarding whatever order the answers arrived in.
+    flat = [Answer(item="", p=0.7, label="a" if i % 2 else "b", kind="choice")
+            for i in range(100)]
+    assert discrimination(flat, ["a"] * 100) == 0.5
+
+
+def test_discrimination_matches_a_hand_worked_case():
+    """Three right and one wrong, with the wrong one second from the top."""
+    answers = [Answer(item="", p=p, label=label, kind="choice")
+               for p, label in ((0.9, "a"), (0.8, "b"), (0.7, "a"), (0.6, "a"))]
+    # Sorted by certainty the labels run a, a, b, a, so of the 3 x 1 right/wrong
+    # pairs the wrong one sits above two of the right ones. Only 1 of 3 pairs is
+    # ordered the way it should be.
+    assert discrimination(answers, ["a"] * 4) == pytest.approx(1 / 3)
+
+
+def test_calibrate_refuses_when_the_certainty_is_noise():
+    """
+    The thing this is for.
+
+    A judge whose certainty cannot tell its right answers from its wrong ones
+    has nothing for a threshold to sort by, so the honest reply is no, not a
+    number. Asked for one anyway, the old behaviour handed back a small positive
+    gain that was the sample flattering itself.
+    """
+    answers, gold = a_judge(2_000, honest=False)
+    assert discrimination(answers, gold) < 0.6
+    with pytest.raises(JevError, match="coin flip"):
+        Calibration.from_answers(answers, gold, keep=0.8)
+    with pytest.raises(JevError, match="coin flip"):
+        Calibration.from_answers(answers, gold, accuracy=0.9)
+
+
+def test_the_refusal_says_what_it_measured_and_how_to_override():
+    answers, gold = a_judge(2_000, honest=False)
+    with pytest.raises(JevError) as raised:
+        Calibration.from_answers(answers, gold, keep=0.8)
+    said = str(raised.value)
+    assert "0.5" in said, "it should name the coin flip it is comparing against"
+    assert "min_signal" in said, "and the way to get the number regardless"
+
+    # Lowered deliberately, it answers, because the caller has said they know.
+    cal = Calibration.from_answers(answers, gold, keep=0.8, min_signal=0.0)
+    assert abs(cal.gain) < 0.03
+
+
+def test_a_real_signal_is_not_refused_and_is_reported():
+    answers, gold = a_judge(2_000, honest=True)
+    cal = Calibration.from_answers(answers, gold, keep=0.8)
+    assert cal.discrimination > 0.6
+    assert f"{cal.discrimination:.3f}" in str(cal), "printing it should show the number"
+
+
 def test_it_finds_a_cut_that_is_really_there():
     answers, gold = a_judge(2_000, honest=True)
     cal = Calibration.from_answers(answers, gold, keep=0.8)
@@ -56,7 +123,9 @@ def test_it_does_not_find_a_cut_that_is_not_there():
     all, and on rows the cut has not seen it must not appear to.
     """
     answers, gold = a_judge(2_000, honest=False)
-    cal = Calibration.from_answers(answers, gold, keep=0.8)
+    # The gate now refuses this outright, which its own test covers. Asked past
+    # it deliberately, the arithmetic underneath still has to find nothing.
+    cal = Calibration.from_answers(answers, gold, keep=0.8, min_signal=0.0)
     assert abs(cal.gain) < 0.03, \
         f"found {cal.gain:+.1%} of agreement in pure noise, which is not there"
     assert cal.low < cal.baseline < cal.high, "and the baseline should sit inside the spread"
@@ -71,10 +140,22 @@ def test_asking_for_a_bar_gives_back_the_coverage_it_costs():
 
 
 def test_a_bar_nothing_reaches_is_an_error_and_says_what_was_possible():
-    answers, gold = a_judge(500, honest=False)     # 85% and no ranking to exploit
+    # A judge whose ranking is real but whose best is 90%: the signal gate lets
+    # it through, and then no cut can reach the bar, which is the path under
+    # test. `a_judge(honest=True)` will not do, because there the surest answers
+    # are right almost always and a small enough slice of them hits any target.
+    dice = random.Random(3)
+    answers, gold = [], []
+    for _ in range(500):
+        certainty = dice.uniform(0.5, 1.0)
+        right = dice.random() < 0.5 + 0.8 * (certainty - 0.5)     # 50% up to 90%
+        answers.append(Answer(item="", p=certainty, label="a" if right else "b", kind="choice"))
+        gold.append("a")
+
+    assert discrimination(answers, gold) > 0.6, "this fixture has to clear the gate"
     with pytest.raises(JevError) as raised:
         Calibration.from_answers(answers, gold, accuracy=0.999)
-    assert "best" in str(raised.value) or "manages" in str(raised.value)
+    assert "manages" in str(raised.value), "it should say what the best any cut managed"
 
 
 def test_it_says_when_the_held_out_rows_fell_short_of_the_bar():

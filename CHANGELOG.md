@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.21.0 (2026-09-21)
+
+`calibrate` used to answer "where do I cut" without first asking whether a cut could mean anything.
+Now it asks.
+
+### Added
+- **`discrimination(answers, gold)`**: can this judge's certainty tell its right answers from its
+  wrong ones? The area under the ROC curve over (certainty, was it right). 1.0 is perfect
+  separation, 0.5 is a coin flip. Ties share an averaged rank, so a judge reporting the same number
+  for everything scores 0.5 rather than whatever order its answers arrived in.
+
+  This is the question that has to come before a threshold, because a threshold sorts by certainty
+  and keeps the top of the pile. If the certainty does not know which answers are wrong, sorting by
+  it is sorting by noise.
+
+  It is also not visible from the answers. A judge can hand back ordinary-looking certainties, well
+  spread, none of them extreme, and still be at 0.5, with nothing in the response to say so. Only
+  labels reveal it, which is why this takes them.
+
+### Changed
+- **`calibrate` and `Calibration.from_answers` now refuse below 0.60 discrimination.** Behaviour
+  change: where they used to return a small positive gain fitted to noise, they raise a `JevError`
+  naming the figure they measured, the agreement without any cut, and `min_signal` for getting the
+  number anyway. A threshold on a ranking that carries no signal is not a conservative answer, it is
+  a wrong one that looks careful.
+- **`Calibration.discrimination`** carries the figure on a run that clears the bar, and prints with
+  the rest, so you can see how much the cut had to work with.
+- `min_signal` on both entry points, defaulting to `MIN_SIGNAL` of 0.60. Lower it deliberately if
+  you know your ranking is faint and want the number regardless.
+
+### Tests
+Five more, including perfect separation and none as the two ends of the scale, a hand-worked case
+checked against the pairs by hand, and the refusal path with its override. The existing
+"does not find a cut that is not there" test now asks past the gate on purpose, so the arithmetic
+underneath stays under test alongside the gate in front of it.
+
+191 tests, four Pythons, three operating systems, a linter, and a volume job.
+
 ## v0.20.2 (2026-09-21)
 
 A correction to the headline, found by reading the page against itself.

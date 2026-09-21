@@ -43,6 +43,12 @@ FEW = 200
 FLOOR = 30
 SPLITS = 20
 SEED = 7
+# Below this, the ranking a threshold would sort by is not telling right answers
+# from wrong ones, so there is nothing for a cut to find. 0.5 is a coin flip;
+# 0.6 leaves room for a weak but real signal and still catches noise. Lower it
+# deliberately with `min_signal` if you know your ranking is faint and you want
+# the number anyway.
+MIN_SIGNAL = 0.60
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,7 @@ class Calibration:
     baseline: float
     items: int
     splits: int
+    discrimination: float = 0.0
     notes: tuple[str, ...] = ()
 
     @property
@@ -78,6 +85,8 @@ class Calibration:
             f"  without a cut           {self.baseline:>6.1%}",
             f"  with it                 {self.accuracy:>6.1%}  ({self.gain * 100:+.1f} points)",
             f"  over {self.splits} held-out splits  {self.low:.1%} to {self.high:.1%}",
+            f"  certainty separates right from wrong at {self.discrimination:.3f} "
+            f"(0.5 is a coin flip)",
             f"  measured on {self.items:,} labelled rows",
         ]
         lines += [f"  note: {note}" for note in self.notes]
@@ -86,21 +95,23 @@ class Calibration:
     @classmethod
     def from_answers(cls, answers: Sequence[Answer], gold: Sequence[str], *,
                      keep: float | None = None, accuracy: float | None = None,
-                     splits: int = SPLITS, seed: int = SEED) -> Calibration:
+                     splits: int = SPLITS, seed: int = SEED,
+                     min_signal: float = MIN_SIGNAL) -> Calibration:
         """
         The same thing on answers you already have, which costs nothing.
 
         Use this to re-cut a finished run at a different target, or to calibrate
         without asking twice.
         """
-        return _work(list(answers), list(gold), keep, accuracy, splits, seed)
+        return _work(list(answers), list(gold), keep, accuracy, splits, seed, min_signal)
 
 
 def calibrate(items: Sequence[str], gold: Sequence[str], instructions: str, *,
               keep: float | None = None, accuracy: float | None = None,
               criteria: dict | None = None, options: dict | None = None,
               levels: Sequence[str] | None = None,
-              client=None, splits: int = SPLITS, seed: int = SEED) -> Calibration:
+              client=None, splits: int = SPLITS, seed: int = SEED,
+              min_signal: float = MIN_SIGNAL) -> Calibration:
     """
     Ask the judge about labelled rows, then find the cut worth trusting.
 
@@ -131,10 +142,54 @@ def calibrate(items: Sequence[str], gold: Sequence[str], instructions: str, *,
     finally:
         if own:
             client.close()
-    return _work(answers, list(gold), keep, accuracy, splits, seed)
+    return _work(answers, list(gold), keep, accuracy, splits, seed, min_signal)
 
 
 # -- the arithmetic ----------------------------------------------------------
+
+def discrimination(answers: Sequence[Answer], gold: Sequence[str]) -> float:
+    """
+    Can this judge's certainty tell its right answers from its wrong ones?
+
+        >>> discrimination(answers, labels)
+        0.87
+
+    The area under the ROC curve over (certainty, was it right). 1.0 is perfect
+    separation, 0.5 is a coin flip, and 0.5 is what a judge out of its depth
+    gives you.
+
+    This is the question to ask before asking where to cut, because a threshold
+    sorts by certainty and keeps the top of the pile. If the certainty does not
+    know which answers are wrong, sorting by it is sorting by noise and any gain
+    that comes back is the sample flattering itself.
+
+    It is also not visible from the answers. A judge can report ordinary-looking
+    certainties, well spread, none of them extreme, and still be at 0.5. Only
+    labels reveal it, which is why this takes them.
+
+    Ties share an averaged rank, so a judge that reports the same number for
+    every item scores 0.5 rather than whatever order it happened to arrive in.
+    """
+    rows = _scored(answers, gold)
+    if not rows:
+        raise JevError("no usable answers to measure")
+    pairs = sorted(rows, key=lambda row: row[0])
+    ranks: dict[int, float] = {}
+    index = 0
+    while index < len(pairs):
+        last = index
+        while last + 1 < len(pairs) and pairs[last + 1][0] == pairs[index][0]:
+            last += 1
+        for position in range(index, last + 1):
+            ranks[position] = (index + last) / 2 + 1
+        index = last + 1
+    right = sum(correct for _certainty, correct in pairs)
+    wrong = len(pairs) - right
+    if not right or not wrong:
+        raise JevError("every answer went the same way, so there is nothing to separate")
+    got = sum(ranks[position] for position, (_c, correct) in enumerate(pairs) if correct)
+    return (got - right * (right + 1) / 2) / (right * wrong)
+
 
 def _scored(answers: Sequence[Answer], gold: Sequence[str]) -> list[tuple[float, float]]:
     """(certainty, 1 if right else 0) for every answer that came back at all."""
@@ -179,7 +234,8 @@ def _at(rows: list[tuple[float, float]], cut: float) -> tuple[float, float]:
 
 
 def _work(answers: list[Answer], gold: list[str], keep: float | None,
-          accuracy: float | None, splits: int, seed: int) -> Calibration:
+          accuracy: float | None, splits: int, seed: int,
+          min_signal: float) -> Calibration:
     if (keep is None) == (accuracy is None):
         raise JevError("say one of keep or accuracy, not both and not neither")
     for name, value in (("keep", keep), ("accuracy", accuracy)):
@@ -201,6 +257,20 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
                      f"and {FEW} or more would narrow it")
 
     baseline = statistics.mean(correct for _c, correct in rows)
+
+    # Before asking where to cut, ask whether a cut can do anything here. A
+    # threshold sorts by certainty and keeps the top, so if the certainty cannot
+    # tell a right answer from a wrong one there is nothing to sort, and the
+    # honest reply is not a number, it is no.
+    separates = discrimination(answers, gold)
+    if separates < min_signal:
+        raise JevError(
+            f"this judge's certainty separates right answers from wrong ones at {separates:.3f}, "
+            f"where 0.5 is a coin flip and anything under {min_signal:.2f} is treated as none. "
+            f"A threshold sorts by certainty, so on these rows there is nothing for one to find, "
+            f"and a gain would be the sample flattering itself. It agrees {baseline:.1%} of the "
+            f"time overall. Either this judge cannot do this task or the question needs "
+            f"rewording; pass min_signal lower to get the number anyway.")
 
     # The cut to deploy is fitted on everything, because that is the one that has
     # seen the most of your data.
@@ -241,7 +311,7 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
         notes.append("no held-out split could find this cut, so there is no estimate "
                      "of what it does on rows it has not seen")
         return Calibration(cut, *_at(rows, cut), 0.0, 0.0, baseline,
-                           len(rows), 0, tuple(notes))
+                           len(rows), 0, separates, tuple(notes))
 
     scores.sort()
     edge = max(0, int(len(scores) * 0.05) - 1) if len(scores) >= 20 else 0
@@ -275,4 +345,4 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
     return Calibration(cut=cut, coverage=statistics.median(coverages),
                        accuracy=statistics.median(scores), low=low, high=high,
                        baseline=baseline, items=len(rows), splits=len(scores),
-                       notes=tuple(notes))
+                       discrimination=separates, notes=tuple(notes))

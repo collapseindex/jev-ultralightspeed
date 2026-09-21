@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 [![Python](https://img.shields.io/pypi/pyversions/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 
-**v0.20.2** · Apache-2.0 · no required dependencies
+**v0.21.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -843,11 +843,41 @@ bar you asked for, it says so, as above: that gap is the self-flattery, and it i
 with.
 
 It also declines to tell you what is not there. Given certainty that carries no information it
-reports a gain of about zero rather than a threshold fitted to noise, which is what it does in the
-test suite on exactly that input (+5.0 points where the signal is real, ±0.3 where it is not). And it
-notes when there are too few rows to say much, when the judge is so sure of everything that the
-ranking has nothing left to sort (the AG News case), and when the bar you asked for is only reachable
-on a sliver of the pile.
+refuses rather than returning a threshold fitted to noise, and it notes when there are too few rows
+to say much, when the judge is so sure of everything that the ranking has nothing left to sort (the
+AG News case), and when the bar you asked for is only reachable on a sliver of the pile.
+
+#### The question to ask before "where do I cut"
+
+A threshold sorts by certainty and keeps the top of the pile. So before it can mean anything, the
+certainty has to know which answers are wrong. That is one number, and it is not accuracy and not
+calibration:
+
+```python
+from jev_ultralightspeed import discrimination
+
+discrimination(answers, labels)      # 0.87
+```
+
+The area under the ROC curve over (certainty, was it right). **1.0 is perfect separation, 0.5 is a
+coin flip.** `calibrate` measures it first and **refuses** below 0.60, because under that there is
+nothing for a cut to find and any gain it reported would be the sample flattering itself:
+
+```
+JevError: this judge's certainty separates right answers from wrong ones at 0.538, where 0.5
+is a coin flip and anything under 0.60 is treated as none. A threshold sorts by certainty, so
+on these rows there is nothing for one to find, and a gain would be the sample flattering
+itself. It agrees 61.2% of the time overall. Either this judge cannot do this task or the
+question needs rewording; pass min_signal lower to get the number anyway.
+```
+
+**This is not visible from the answers.** A judge can hand back ordinary-looking certainties, well
+spread, none of them extreme, and still be at 0.5. Nothing in the response says which. Only labels
+reveal it, which is why both of these take them, and why a few hundred labelled rows of your own are
+worth more than any number in this README.
+
+On a run that clears the bar, the figure comes back on the result (`cal.discrimination`) and prints
+with it, so you can see how much the cut had to work with.
 
 ### Carrying the question once
 
@@ -1003,7 +1033,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 186 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 191 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench/eval.py            # the table above, ~35 min, ~$1.20
