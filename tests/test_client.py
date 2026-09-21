@@ -1483,8 +1483,14 @@ def test_a_paced_limiter_puts_a_floor_under_the_gap():
     # (now + 0.1) - now, which in floating point is 0.10000000000002274 for a
     # `now` the size of an uptime. Windows CI found that; Linux never did.
     assert 0.0 < wait <= 0.1 + 1e-6, wait
-    time.sleep(wait)
-    assert limiter.try_take() == 0.0
+    # Waited out with the blocking form rather than by sleeping for `wait` and
+    # asking again. On Windows that sleep returns about 6ms early against
+    # time.monotonic(), and the second ask says no. take() loops until it is
+    # really allowed, which is the thing a caller does anyway.
+    started = time.monotonic()
+    limiter.take()
+    assert time.monotonic() - started > 0.0, "it did not wait at all"
+
 
 
 def test_pacing_does_not_bank_credit_while_nothing_is_running():
