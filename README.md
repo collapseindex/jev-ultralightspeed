@@ -36,6 +36,11 @@ and took a live 32-item request from **4,598 billed tokens to 1,777**. It is off
 it costs about 0.2 points of agreement, so it is yours to turn on, but it is the saving that survives
 the pricing being rewritten.
 
+<video src="https://github.com/collapseindex/jev-ultralightspeed/raw/main/docs/demo.mp4" controls muted loop playsinline width="100%"></video>
+
+[Watch the demo](https://github.com/collapseindex/jev-ultralightspeed/raw/main/docs/demo.mp4) if that
+does not play where you are reading this. Sound is worth it.
+
 ```bash
 python demo.py                 # both arms, no key needed
 python demo.py --speed 1       # in real time rather than at 4x
