@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.20.2 (2026-09-21)
+
+A correction to the headline, found by reading the page against itself.
+
+"A million judgements: half an hour and $4.99" sat three lines under "the 41% and the accuracy are
+measured, over 30,000 judgements against human labels", and a reader had every reason to take both
+as the same run. They are not. The times come from the benchmark, the two prices come from
+`bench/soak.py`, which is a million synthetic support messages at 138 tokens each. Short items are
+where packing saves most, so those two numbers also disagreed with the 41% four lines above them:
+$4.99 against $14.97 is 67% less, not 41%.
+
+Nothing was invented and the soak run was already described honestly where it is derived, three
+hundred lines down. The headline just did not carry the caveat, which is the one place it mattered.
+It now says "a million short messages", names the corpus, and gives the benchmark's own figure for
+comparison: nearer $14 a million packed against $24 unpacked, from $0.430 and $0.729 over 30,000
+judgements.
+
+Length is what moves this number, which is the actual lesson, so the paragraph now says to measure it
+on your own rows before budgeting against either figure.
+
 ## v0.20.1 (2026-09-20)
 
 Presentation, not code. Status badges on the README (tests, PyPI, Python), because a green CI badge

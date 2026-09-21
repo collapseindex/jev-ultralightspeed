@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 [![Python](https://img.shields.io/pypi/pyversions/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 
-**v0.20.1** · Apache-2.0 · no required dependencies
+**v0.20.2** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -25,8 +25,14 @@ benchmark can detect.** The 32 is the pack depth, and under a ceiling counted in
 arithmetic rather than a measurement. The 41% and the accuracy are measured, over 30,000 judgements
 against human labels, with a script in this repository.
 
-**A million judgements: half an hour and $4.99. One request per item: seventeen hours and $14.97.**
-Same ceiling, same model, same question. The time is the part you feel.
+**A million short messages: half an hour and $4.99. One request per item: seventeen hours and
+$14.97.** Same ceiling, same model, same question. The time is the part you feel.
+
+Those two prices are a [different corpus](#the-benchmark) from the accuracy above: a million
+synthetic support messages at 138 tokens each, where the per-item text is a small share of a request
+and packing therefore saves most. The benchmark's own items are longer and it saves 41%, which works
+out nearer $14 a million packed against $24 unpacked. Length is what moves this number, so measure it
+on your own rows before you budget against either one.
 
 **The 32x is a bet on how you are charged, and that is worth saying out loud.** It holds because the
 ceiling counts requests. The day it counts tokens instead, the 32 evaporates and the 41% is what is
