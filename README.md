@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.17.1** · Apache-2.0 · no required dependencies
+**v0.18.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -231,12 +231,59 @@ not free: mean latency more than doubles between 4 and 24, so the service queues
 saying twenty-four workers are six times four is out by about 60%.
 
 **Two things that table cannot tell you.** Forty requests cannot fill a sixty second window, so every
-figure is a burst and none is a sustained rate: whether four workers hold 993 a minute for ten minutes
-is untested. And the mean is what governs a queue's throughput, not the median, which is why the mean
-is the column to read. An earlier version of this section quoted a rate derived from the median and
-was optimistic by about a fifth, as well as circular, since in a burst the measured rate is the
-latency bound. Raise `workers` if you raise `requests_per_minute`, or if you see the request rate
-falling short. Otherwise leave it. `bench_workers.py` reruns this for about ten cents.
+figure in it is a burst and none is a sustained rate. And the mean is what governs a queue's
+throughput, not the median, which is why the mean is the column to read. An earlier version of this
+section quoted a rate derived from the median and was optimistic by about a fifth, as well as
+circular, since in a burst the measured rate is the latency bound. Raise `workers` if you raise
+`requests_per_minute`, or if you see the request rate falling short. Otherwise leave it.
+`bench_workers.py` reruns this for about ten cents.
+
+#### The burst, held for ten minutes
+
+The first of those was untested for four releases, and it was the one that mattered: two throughput
+claims have been withdrawn from this README already and both were short runs read as rates. So here
+is a long one. Eight workers, `pack=32`, the default ceiling of 1,000 a minute, ten minutes without
+stopping, 320,000 items for $1.61:
+
+| minute | requests/min | items/s | retries |
+| ---: | ---: | ---: | ---: |
+| 1st | 999 | 533 | 0 |
+| 2nd to 9th | 996 to 1,003 | 531 to 535 | 0 |
+
+**1,000 a minute, flat, for the whole run.** Front half against back half is a drift of +0.0%, so the
+rate is a rate and not a bucket draining slowly. 533 items a second is the ceiling exactly: at
+`pack=32` there is nothing left on the table, and the reason the earlier numbers looked like a burst
+is that they were measured before the limiter had anything to do.
+
+What a short run actually looks like is worth seeing, because it is why those claims were withdrawn.
+In the first 90 second trial the request count climbed to 999 by t=27s, then sat perfectly still
+until t=61s when the window rolled. Every sub-minute measurement in this repository was reading that
+first slope.
+
+Two more things fell out of it. Tokens moved at 63,700 a second against a published ceiling of
+250,000, so **the request ceiling binds first and by four times over**, which is the whole arithmetic
+behind packing. And over 13,000 requests against the live service there were no 429s at all and eight
+dropped connections, each retried and recovered.
+
+```bash
+TYPESAFE_API_KEY=... python bench_sustained.py --minutes 10 --budget 2.50
+python bench_sustained.py --analyse data/results/<file>
+```
+
+It stops at the clock or the budget, whichever comes first, and the budget is enforced by the
+generator feeding it simply stopping, so nothing is cancelled mid-flight and the last requests still
+land and count.
+
+Note that this measured eight workers, not the default four. Four reaching the ceiling is still a
+burst measurement.
+
+**Whether the limiter itself holds is not measured here**, and the first version of this bench got
+that wrong twice in one run: it counted responses, which bunch, and then counted permits with a stamp
+taken just after each one rather than at it. Both read one request over the ceiling and neither meant
+anything. The ceiling is a property of the limiter and needs no API to test, so it is checked in the
+test suite instead, against the limiter's own timestamps, over an hour of simulated traffic offered
+at three times the ceiling: never more than 1,000 in any 60 seconds, and a permit exactly 60.000
+seconds old is outside the window.
 
 It is also not compute-bound. At 533 items/s and 341 tokens an item it is moving roughly 700 KB/s of
 JSON, so `orjson`, `uvloop` and more cores have nothing to do here. Every remaining lever is about
@@ -437,8 +484,10 @@ you it could not decide between two rungs, which is the same information a human
 and it arrives for free. Ranking by that distance instead of by probability keeps 78% at the 97% bar
 and lands on 96.5%, so the two signals are worth about the same and they are not the same signal.
 
-**This is a new question shape, not a new corpus.** Every accuracy figure in this repository still
-comes from one pod and one task, and this does not change that.
+**This is a new question shape, not a new corpus.** The score numbers on this page all come from the
+one pod and the one task, and this section does not change that. The triage result is the exception
+and is measured on [three corpora](#does-it-hold-anywhere-but-xstest); the rest of the accuracy
+figures here are still XSTest.
 
 ```bash
 TYPESAFE_API_KEY=... python bench_score.py      # the table above, about seven cents
@@ -640,8 +689,47 @@ part it is sure about" rather than "as good as a person". What it means in pract
 rows do not need a million pairs of eyes; they need eyes on about two hundred thousand, and the judge
 picks which.
 
-Four more things fell out of that run, and two of them are negative results worth as much as the
-positive one.
+#### Does it hold anywhere but XSTest
+
+That was one corpus, one domain, one pair of annotators, which is the weakness in it. A threshold
+that generalises across tasks is a different claim from one that works on refusal classification, so
+the same run now goes against two more, picked to be unlike it and unlike each other. **BoolQ** is
+yes/no reading comprehension over Wikipedia passages, and the only one of the three that exercises
+the question type this library is named after. **AG News** is four way topic labelling that needs no
+reasoning at all, only recognition. Same judge, same analysis, same held-out split:
+
+| corpus | question | items | agreement | at 90% | at 80% | at 70% | calibration | agrees with itself | wavers |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| xstest | pick one of 3 | 1,347 | 89.3% | 94.4% | **96.8%** | 98.5% | -4.4% | 92.7% | 43.4% |
+| boolq | yes/no | 3,270 | 91.0% | 94.0% | **95.3%** | 96.1% | +5.8% | 93.2% | 53.7% |
+| ag_news | pick one of 4 | 3,270 | 88.7% | 92.2% | **94.7%** | 95.6% | -6.1% | 91.4% | 52.0% |
+
+**The shape holds on all three.** Setting aside the least-sure fifth is worth 7.1 points on XSTest,
+4.3 on BoolQ and 6.0 on AG News, each measured on items the cut was not chosen on. The wavering
+signal holds too: where all six goes agree the judge is right 91 to 93% of the time, and where they
+do not it is close to a coin flip on every corpus. Asking six times still buys nothing anywhere
+either (BoolQ 91.3% voted against 91.0% asked once, AG News 88.8% against 89.0%).
+
+**What does not transfer is the number.** The cut that keeps four fifths is 0.92 on XSTest, 0.77 on
+BoolQ and 0.95 on AG News. Carry a threshold across and you will keep half of one corpus and nearly
+all of another. The direction of the miscalibration flips as well: on BoolQ the judge is *less* sure
+than it turns out to be, on the other two more. So there is no constant to take from this table, only
+a method, which is why the advice at the end of this section is to spend an hour measuring it on a
+few hundred labelled rows of your own.
+
+One caveat that belongs to easy tasks rather than to the method. On AG News four judgements in five
+come back at a probability of 1.000, so the ranking runs out of resolution: no cut keeps fewer than
+63% of the items, and the bottom three rows of its risk-coverage table are all that same 63%. Where a
+judge is sure of nearly everything there is correspondingly little for triage to sort.
+
+```bash
+python corpora.py --build boolq ag_news    # downloads once; the only thing here that goes out
+python bench_confidence.py --corpus boolq
+python bench_confidence.py --compare data/results/*confidence*.jsonl
+```
+
+Four more things fell out of the XSTest run, and two of them are negative results worth as much as
+the positive one.
 
 **Asking the same item six times buys nothing.** Majority of six: 89.5%. A single ask: 89.7%. Six
 times the tokens for a fifth of a point in the wrong direction. Self-consistency voting is the first
@@ -849,7 +937,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 149 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 158 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
@@ -861,7 +949,12 @@ TYPESAFE_API_KEY=... python bench_score.py           # a score against human lab
 TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
 TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
 TYPESAFE_API_KEY=... python bench_guidance.py        # the question once vs per item, ~25 cents
+TYPESAFE_API_KEY=... python bench_sustained.py       # is the rate a rate, 10 min, ~$1.60
 TYPESAFE_API_KEY=... python soak.py --items 100000   # sustained load, ~50 cents
+
+python corpora.py --build boolq ag_news              # the labelled sets, downloaded once
+TYPESAFE_API_KEY=... python bench_confidence.py --corpus boolq    # triage on one, ~15 cents
+python bench_confidence.py --compare data/results/*confidence*.jsonl   # all of them, free
 ```
 
 The tests replace the one method that talks to the API, so the packing, the deduplication, the cache,

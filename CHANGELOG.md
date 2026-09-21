@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.18.0 (2026-09-20)
+
+No library change. Two claims that had been carried on thin evidence, measured properly: that the
+throughput is a rate rather than a burst, and that the triage result is about the judge rather than
+about XSTest.
+
+### Added
+- **`bench_sustained.py`**: one arm, the shipping shape, run until the limiter's window has refilled
+  many times over. Ten minutes at `pack=32` and eight workers held **1,000 requests a minute, flat,
+  for 320,000 items and $1.61**, with a front-half to back-half drift of +0.0%. 533 items a second,
+  which is the ceiling exactly. It stops at the clock or a budget, whichever comes first, and the
+  budget is enforced by the generator feeding the run simply stopping, so nothing is cancelled
+  mid-flight and the last requests still land and count.
+
+  This closes a caveat that had been in the README for four releases: every previous throughput
+  figure came from a run shorter than the sixty second window that bounds it. A 90 second trial shows
+  why that mattered: the request count climbs to 999 by t=27s, sits perfectly still until t=61s when
+  the window rolls, then resumes. Two withdrawn claims were both readings of that first slope.
+
+  Also out of it: tokens moved at 63,700 a second against a published 250,000, so the request ceiling
+  binds first and by four times over, which is the arithmetic behind packing. Over 13,000 live
+  requests there were no 429s and eight dropped connections, each retried and recovered.
+
+- **`corpora.py`**: the labelled sets the accuracy claims are measured on, as one registry.
+  `--build` downloads BoolQ and AG News once into `data/raw/` and is the only thing in the repository
+  that goes out; every bench afterwards reads the file.
+
+- **`tests/test_benches.py`**: nine tests on the arithmetic behind the published numbers, which had
+  none. Includes the ceiling check the sustained bench cannot make: an hour of simulated traffic
+  offered at three times the ceiling, against the limiter's own timestamps, asserting no sixty
+  seconds ever holds more than the ceiling allows, and that a permit exactly 60.000 seconds old is
+  outside the window.
+
+### Changed
+- **`bench_confidence.py` takes `--corpus` and `--compare`.** The same collection and the same
+  held-out analysis now run against any of the three corpora, and `--compare` reads several finished
+  runs side by side for nothing. Ranking is by `certainty` rather than `p`, which matters for the
+  first time now that a yes/no corpus is in the set: `p` there is the probability of yes, so ranking
+  on it would put the judge's firmest verdicts at the bottom. Files written before `certainty` was
+  recorded still read, and re-analysing the committed XSTest run gives the same 89.7% to 96.8% as
+  before.
+
+### What the second and third corpora found
+The triage finding holds, and the threshold does not travel.
+
+| corpus | question | items | agreement | at 80% coverage |
+| --- | --- | ---: | ---: | ---: |
+| xstest | pick one of 3 | 1,347 | 89.3% | 96.8% |
+| boolq | yes/no | 3,270 | 91.0% | 95.3% |
+| ag_news | pick one of 4 | 3,270 | 88.7% | 94.7% |
+
+Setting aside the least-sure fifth is worth 7.1 points on XSTest, 4.3 on BoolQ and 6.0 on AG News,
+each measured on items the cut was not chosen on. The wavering signal holds on all three (91 to 93%
+where six goes agree, close to a coin flip where they do not), and asking six times still buys
+nothing anywhere.
+
+What does not transfer is the number. The cut that keeps four fifths is 0.92 on XSTest, 0.77 on BoolQ
+and 0.95 on AG News, and the direction of the miscalibration flips: on BoolQ the judge is less sure
+than it turns out to be, on the other two more. There is no constant to carry across, only a method.
+
+### Two mistakes this made, both caught before publishing
+Worth writing down because both looked like findings.
+
+- The sustained bench's first ceiling check counted `usage.requests`, which is incremented when a
+  response arrives. The ceiling is a promise about when requests go out, responses bunch, and the
+  check reported the limiter over its ceiling and called it a bug. It was reading the wrong event.
+- Counting permits instead still read one over, because the stamp was taken just after each permit
+  rather than at it, and the file rounded stamps to four decimals. Under eight threads that is enough
+  jitter to move a request across a window edge. The limiter turned out to be exact, which an offline
+  run against its own timestamps settled for nothing: 2,000 permits granted, never more than 1,000
+  inside any sixty seconds. The live bench no longer makes a claim it cannot resolve.
+
+158 tests, four Pythons, three operating systems, a linter, and a volume job.
+
 ## v0.17.1 (2026-09-20)
 
 No library change. The thing a review said to attack next: packing, caching, checkpoints and failure

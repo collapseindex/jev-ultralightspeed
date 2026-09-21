@@ -6,3 +6,7 @@ build/
 *.egg-info/
 .pytest_cache/
 dist/
+
+# The corpora are downloaded by corpora.py, not vendored here: they belong to
+# whoever published them and this repository does not republish their text.
+data/raw/
