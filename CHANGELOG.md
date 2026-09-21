@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.15.2 (2026-09-20)
+
+No library change. The README now says who this is for, near the top, where somebody deciding whether
+to install it will read it.
+
+### Added
+- **"Is this for your job"**, a table of work this does and does not suit. Three things decide it: the
+  work is a queue rather than a request, the question is a judgement rather than a piece of writing,
+  and the items are independent of each other.
+
+  Fits: grading model outputs, labelling a dataset before humans see it, triaging tickets, re-running
+  a taxonomy change over history. Partly: routing or risk-flagging pull requests, which works for "does
+  this touch auth" and not for writing the review; classifying documents, where length costs depth.
+  Careful: hostile user text, which wants `pack=1`. No: summarising or extracting fields, because Jev
+  returns a typed answer and there is no text to make fast; one item with somebody waiting; and fewer
+  than a few thousand items, where thirty requests need no library.
+- **What length does to throughput**, because that is the number that decides whether this is worth it:
+
+  | what it is | characters | packs | items/s | a million takes |
+  | --- | ---: | ---: | ---: | ---: |
+  | a support message | 300 | 64 | 1,067 | 16 minutes |
+  | a model completion | 1,100 | 64 | 1,067 | 16 minutes |
+  | a page of a document | 5,000 | 19 | 317 | 53 minutes |
+  | a contract clause set | 20,000 | 4 | 67 | 4.2 hours |
+
+  A request holds about 98,000 characters of items, and depth is what one unit of the rate limit buys.
+  So the answer to "how fast is this for me" is mostly "how long are your rows".
+
+132 tests, no key and no network needed.
+
 ## v0.15.1 (2026-09-20)
 
 No library change. The score question type from v0.15.0, measured against human labels.

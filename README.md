@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.15.1** · Apache-2.0 · no required dependencies
+**v0.15.2** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -35,6 +35,42 @@ against 500**, which is the same 32 as everything else here, arriving where you 
 makes a single item slower, not faster. This is for a queue.
 
 Not affiliated with TypeSafe; the hedgehog is a parody and belongs to nobody.
+
+## Is this for your job
+
+Three things decide it: the work is a **queue** rather than a request, the question is a **judgement**
+rather than a piece of writing, and the items are **independent** of each other. Everything else is
+detail.
+
+| the work | fits | why, and what to set |
+| --- | --- | --- |
+| grading model outputs against a rubric | **yes** | the measured case. Short items pack deepest, and `triage` matters most where the results feed a decision |
+| labelling a dataset before humans see it | **yes** | `triage(keep=0.8)` sends the fifth it is least sure about to a person and keeps the rest |
+| triaging tickets, messages, logs | **yes** | short items, so the deepest packs and the cheapest per row |
+| re-running a taxonomy change over history | **yes** | this is what `checkpoint` is for: a million rows, and it survives being killed |
+| routing or risk-flagging pull requests | **partly** | "does this touch auth", "which reviewer", "is this risky" all work. Writing the review does not |
+| classifying documents | **partly** | works, but length costs depth: see the table below |
+| moderating hostile user text | **careful** | use `pack=1`. Packing puts thirty-two strangers in one context, see [SECURITY.md](SECURITY.md) |
+| summarising, rewriting, extracting fields | **no** | Jev returns a typed answer, not text. There is nothing here to make fast |
+| one item with somebody waiting | **no** | packing makes a single item slower. Call the API directly |
+| fewer than a few thousand items | **no** | 971 items is thirty packed requests. You do not need a library for that |
+
+**Length is the thing that decides your throughput**, because a request holds about 98,000 characters
+of items and depth is what one unit of the rate limit buys:
+
+| what it is | characters | packs | items/s | a million takes |
+| --- | ---: | ---: | ---: | ---: |
+| a support message | 300 | 64 | 1,067 | 16 minutes |
+| a model completion | 1,100 | 64 | 1,067 | 16 minutes |
+| a PR title and diff stat | 2,000 | 49 | 817 | 20 minutes |
+| a page of a document | 5,000 | 19 | 317 | 53 minutes |
+| a long email thread | 10,000 | 9 | 150 | 1.9 hours |
+| a contract clause set | 20,000 | 4 | 67 | 4.2 hours |
+
+Depth is capped at 64 in that table because that is as deep as this has been measured, not because the
+format stops. A single item is refused over 20,000 characters. If your rows are long, read
+[Trimming the items](#trimming-the-items) before cutting them down, because below a point that you have
+to measure it does not degrade gracefully, it falls over.
 
 ## The benchmark
 
