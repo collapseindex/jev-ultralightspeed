@@ -7,10 +7,20 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Checkpoint files, TLS trust, threads against an event loop and the shutdown
+    # path are all places where an operating system has opinions, so all three
+    # get a say rather than Linux alone.
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
