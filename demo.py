@@ -1,18 +1,17 @@
 """
-Two clients, one ceiling, thirty seconds. Watch the gap open.
+Two clients, one ceiling. Watch the gap open.
 
     python demo.py                      # replayed from the recorded run, no key
+    python demo.py --items 10000        # a shorter one
     TYPESAFE_API_KEY=... python demo.py --live
 
-The point is the delta, not the rate. One request per item and thirty-two items a
-request are both held to the same 1,000 requests a minute, so the only thing that
-differs is how many judgements ride on each one. After thirty seconds the counters
-are about thirty-two apart, and the footer says what that means for a million rows.
+Both arms are held to the same 1,000 requests a minute, so the only thing that
+differs is how many judgements ride on each request. It runs until the packed arm
+has finished the job, and the other bar shows how far it got in the same time.
 
-Replay mode uses the real timings from `bench_eval.py`'s run, which is in
-`data/results`: 30,000 requests in 1,801 seconds against 940. Nothing is invented,
-it is the same numbers at a different speed. `--live` runs both arms against the
-API for about five cents and is slower to start.
+Replay uses the rates the benchmark measured: 16.7 items a second one at a time,
+and what the ceiling allows at pack=32. Nothing is invented. `--live` runs both
+arms against the API, sharing one limiter, for about ten cents.
 """
 
 from __future__ import annotations
@@ -28,20 +27,31 @@ sys.path.insert(0, "src")
 
 CEILING = 1_000                  # requests a minute, the client's default
 PACK = 32
-SECONDS = 30
-BAR = 34
+ITEMS = 30_000
+BAR = 24
+PLAIN, PACKED = "regular jev", "ultralightspeed jev"
+GREY, BLUE, WHITE, DIM, OFF = "\033[38;5;244m", "\033[38;5;45m", "\033[97m", "\033[2m", "\033[0m"
+
+# Padded to one width so the speed lines behind him line up.
+SANIC = [line.ljust(15) for line in [
+    "       ___",
+    "     ,'   `.",
+    "    /  o  o \\",
+    "   |    >    |",
+    "    \\  \\__/ /",
+    "     `.___,'",
+    "     //   \\\\",
+    "    ''     ''",
+]]
 
 
 def _bars() -> tuple[str, str]:
     """Blocks where the terminal can take them, hashes where it cannot."""
     try:
-        "\u2588\u2591".encode(sys.stdout.encoding or "utf-8")
-        return "\u2588", "\u2591"
+        "█░".encode(sys.stdout.encoding or "utf-8")
+        return "█", "░"
     except (UnicodeEncodeError, LookupError, TypeError):
         return "#", "."
-
-
-GREY, BLUE, WHITE, DIM, OFF = "\033[38;5;244m", "\033[38;5;39m", "\033[97m", "\033[2m", "\033[0m"
 
 
 FULL, EMPTY = _bars()
@@ -49,60 +59,67 @@ FULL, EMPTY = _bars()
 
 def a_million(rate: float) -> str:
     """How long a million judgements take at this rate, in words a person uses."""
+    if rate <= 0:
+        return "forever"
     hours = 1_000_000 / rate / 3600
-    if hours >= 1.5:
-        return f"{hours:.0f} hours"
-    return f"{hours * 60:.0f} minutes"
+    return f"{hours:.0f} hours" if hours >= 1.5 else f"{hours * 60:.0f} minutes"
 
 
-def draw(elapsed: float, counts: dict[str, float], note: str) -> None:
-    width = min(shutil.get_terminal_size((90, 20)).columns, 96)
-    lines = [f"{WHITE}30,000 judgements, one ceiling of {CEILING} requests a minute{OFF}", ""]
-    most = max(max(counts.values()), 1.0)
-    for name, done in counts.items():
-        filled = int(BAR * min(1.0, done / most))
-        colour = BLUE if "ultralightspeed" in name else GREY
+def draw(elapsed: float, counts: dict[str, float], target: int, note: str) -> None:
+    width = min(shutil.get_terminal_size((100, 30)).columns, 100)
+    out = [f"{WHITE}{target:,} judgements, one ceiling of {CEILING} requests a minute{OFF}", ""]
+    speed = counts[PACKED] / max(elapsed, 0.1)
+    # The trail streams out behind him, which is the left, and it grows with the
+    # packed arm's rate, so the picture is a gauge rather than a decoration.
+    length = min(22, int(speed / 24))
+    for index, line in enumerate(SANIC):
+        trail = ("=" * length) if 2 <= index <= 5 else ""
+        out.append(f"  {BLUE}{trail:>22}{OFF}{DIM}{line}{OFF}")
+    out.append("")
+    for name in (PLAIN, PACKED):
+        done = counts[name]
+        share = min(1.0, done / target)
+        filled = round(BAR * share)
+        colour = BLUE if name == PACKED else GREY
         bar = colour + FULL * filled + DIM + EMPTY * (BAR - filled) + OFF
         rate = done / elapsed if elapsed else 0.0
-        lines.append(f"  {name:<22} {bar} {done:>8,.0f}  {rate:>6.0f}/s")
-        lines.append(f"  {DIM}{'':<22} {'a million would take ' + a_million(max(rate, 1)):<44}{OFF}")
-    lines += ["", f"  {DIM}{note}{OFF}", f"  {DIM}{elapsed:>4.1f}s elapsed{OFF}"]
-    sys.stdout.write("\033[H\033[J" + "\n".join(line[:width] for line in lines) + "\n")
+        out.append(f"  {WHITE}{name:<21}{OFF}{bar} {done:>7,.0f} {rate:>6.0f}/s {share:>5.0%}")
+        out.append(f"  {DIM}{'':<21}a million would take {a_million(rate)}{OFF}")
+    out += ["", f"  {DIM}{note}{OFF}", f"  {DIM}{elapsed:>5.1f}s elapsed{OFF}"]
+    sys.stdout.write("\033[H\033[J" + "\n".join(out) + "\n")
     sys.stdout.flush()
 
 
-def replay() -> None:
-    """The recorded run, sped up. Both rates are what the benchmark measured."""
+def replay(target: int) -> None:
+    """The recorded run. Both rates are what the benchmark measured."""
     plain = 30_000 / 1801.3                       # the unpacked arm, 16.7 a second
-    packed = PACK * CEILING / 60                  # what the ceiling allows a packed arm
-    counts = {"one request per item": 0.0, "jev + ultralightspeed": 0.0}
+    packed = PACK * CEILING / 60                  # what the ceiling allows at pack=32
+    counts = {PLAIN: 0.0, PACKED: 0.0}
     started = time.monotonic()
-    while True:
+    while counts[PACKED] < target:
         elapsed = time.monotonic() - started
-        if elapsed > SECONDS:
-            break
-        counts["one request per item"] = min(30_000, plain * elapsed)
-        counts["jev + ultralightspeed"] = min(30_000, packed * elapsed)
-        draw(elapsed, counts, "replayed from data/results at 1x. Nothing here is invented.")
+        counts[PLAIN] = min(target, plain * elapsed)
+        counts[PACKED] = min(target, packed * elapsed)
+        draw(elapsed, counts, target, "replayed from data/results. Nothing here is invented.")
         time.sleep(0.08)
-    finish(counts, plain, packed)
+    finish(counts, target, time.monotonic() - started)
 
 
-def live() -> None:
-    """Both arms against the real API, sharing one ceiling, for about five cents."""
+def live(target: int) -> None:
+    """Both arms against the real API, sharing one ceiling."""
     from jev_ultralightspeed import Client, REQUESTS_PER_MINUTE, _Limiter
 
-    rows = [f"ticket {n}: the checkout is failing and orders are being lost" for n in range(40_000)]
+    rows = [f"ticket {n}: the checkout is failing and orders are being lost" for n in range(target)]
     question = "Does this need a human today?"
     shared = _Limiter(REQUESTS_PER_MINUTE)
-    counts = {"one request per item": 0.0, "jev + ultralightspeed": 0.0}
+    counts = {PLAIN: 0.0, PACKED: 0.0}
     stop = threading.Event()
 
-    def run(name: str, pack: int, feed) -> None:
+    def run(name: str, pack: int) -> None:
         client = Client(pack=pack, workers=8, cache=False, dedupe=False, limiter=shared)
         client.warm()
         try:
-            for _ in client.stream(feed, question, chunk=2_000):
+            for _ in client.stream(iter(rows), question, chunk=2_000):
                 counts[name] += 1
                 if stop.is_set():
                     return
@@ -111,37 +128,33 @@ def live() -> None:
         finally:
             client.close()
 
-    threads = [threading.Thread(target=run, args=("one request per item", 1, iter(rows[:2_000])),
-                                daemon=True),
-               threading.Thread(target=run, args=("jev + ultralightspeed", PACK,
-                                                  iter(rows)), daemon=True)]
-    for thread in threads:
-        thread.start()
+    for name, pack in ((PLAIN, 1), (PACKED, PACK)):
+        threading.Thread(target=run, args=(name, pack), daemon=True).start()
     started = time.monotonic()
-    while time.monotonic() - started < SECONDS:
-        elapsed = time.monotonic() - started
-        draw(elapsed, counts, "live, both arms sharing one ceiling. About five cents.")
+    while counts[PACKED] < target:
+        draw(time.monotonic() - started, counts, target, "live, both arms sharing one ceiling.")
         time.sleep(0.08)
     stop.set()
-    elapsed = time.monotonic() - started
-    finish(counts, counts["one request per item"] / elapsed,
-           counts["jev + ultralightspeed"] / elapsed)
+    finish(counts, target, time.monotonic() - started)
 
 
-def finish(counts: dict[str, float], plain: float, packed: float) -> None:
-    draw(SECONDS, counts, "done")
+def finish(counts: dict[str, float], target: int, elapsed: float) -> None:
+    draw(elapsed, counts, target, "done")
+    behind = counts[PLAIN]
     print()
-    print(f"  {WHITE}In {SECONDS} seconds: {counts['jev + ultralightspeed']:,.0f} judgements "
-          f"against {counts['one request per item']:,.0f}.{OFF}")
-    print(f"  {WHITE}A million: {a_million(packed)} against {a_million(plain)}.{OFF}")
+    print(f"  {WHITE}{target:,} judgements in {elapsed:.0f} seconds. "
+          f"regular jev got through {behind:,.0f}.{OFF}")
+    print(f"  {WHITE}A million: {a_million(counts[PACKED] / elapsed)} against "
+          f"{a_million(behind / elapsed)}.{OFF}")
     print(f"  {DIM}Same ceiling, same model, same question. "
           f"{PACK} items on a request instead of 1.{OFF}\n")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--items", type=int, default=ITEMS)
     parser.add_argument("--live", action="store_true",
-                        help="run both arms against the API, about five cents")
+                        help="run both arms against the API, about ten cents")
     arguments = parser.parse_args()
     if os.name == "nt":
         os.system("")                              # let Windows terminals do colour
@@ -152,7 +165,7 @@ def main() -> int:
     global FULL, EMPTY
     FULL, EMPTY = _bars()
     try:
-        live() if arguments.live else replay()
+        live(arguments.items) if arguments.live else replay(arguments.items)
     except KeyboardInterrupt:
         print()
     return 0

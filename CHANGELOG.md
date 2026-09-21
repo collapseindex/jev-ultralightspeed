@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.15.3 (2026-09-20)
+
+No library change. Four things wrong with the demo, all of them found by running it.
+
+### Fixed
+- **The packed bar sat at 100% the whole way.** It was drawn as a share of whichever arm was ahead,
+  which is always itself. It is a share of the job now, so it fills as the work does.
+- **The header promised 30,000 judgements and the run stopped at about 16,000**, because it ran for a
+  fixed thirty seconds rather than until the work was done. It runs to the end now: 30,000 in 56
+  seconds, against about 940 for the other arm, which is a better ending anyway. `--items` takes a
+  smaller job.
+- **The labels said "one request per item" and "jev + ultralightspeed".** They say **regular jev** and
+  **ultralightspeed jev**, which is what the poster says.
+- The rate column was being cut off at the right edge on a normal terminal.
+
+### Added
+- Sanic, with speed lines that grow with the packed arm's rate, streaming out behind him rather than
+  in front. The drawing is a gauge.
+
+132 tests, no key and no network needed.
+
 ## v0.15.2 (2026-09-20)
 
 No library change. The README now says who this is for, near the top, where somebody deciding whether

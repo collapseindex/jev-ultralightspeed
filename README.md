@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.15.2** · Apache-2.0 · no required dependencies
+**v0.15.3** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -25,11 +25,13 @@ against human labels, with a script in this repository.
 Same ceiling, same model, same question. The time is the part you feel.
 
 ```bash
-python demo.py        # thirty seconds, both arms, no key needed
+python demo.py                 # both arms, no key needed
+python demo.py --items 4000    # a shorter one
 ```
 
-Two counters against the same rate limit. After thirty seconds it is about **16,000 judgements
-against 500**, which is the same 32 as everything else here, arriving where you can watch it.
+Two counters against the same rate limit, running until the packed arm has finished the job. At the
+default it is **30,000 judgements in 56 seconds, against about 940** for the other one: the same 32 as
+everything else here, arriving where you can watch it.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
