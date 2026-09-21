@@ -1,6 +1,10 @@
 # jev-ultralightspeed
 
-**v0.20.0** · Apache-2.0 · no required dependencies
+[![tests](https://github.com/collapseindex/jev-ultralightspeed/actions/workflows/test.yml/badge.svg)](https://github.com/collapseindex/jev-ultralightspeed/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
+[![Python](https://img.shields.io/pypi/pyversions/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
+
+**v0.20.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 

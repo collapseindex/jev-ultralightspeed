@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.1 (2026-09-20)
+
+Presentation, not code. Status badges on the README (tests, PyPI, Python), because a green CI badge
+does real work when the headline claim is a measurement someone has to decide whether to trust.
+
+And the Python versions are spelled out in the classifiers one at a time instead of a bare
+`Python :: 3`, so PyPI and the badge say 3.10 through 3.13, which is what the test matrix actually
+runs.
+
 ## v0.20.0 (2026-09-20)
 
 An outside review read the source and found a bug that answers rows with the wrong question and says
