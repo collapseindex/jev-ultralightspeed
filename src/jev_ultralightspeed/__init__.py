@@ -39,7 +39,7 @@ from typing import Callable, Iterable, NamedTuple, Sequence
 from . import _http2
 from ._ledger import Ledger, NotACheckpoint
 
-__version__ = "0.15.5"
+__version__ = "0.16.0"
 
 URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -77,7 +77,7 @@ MIN_SKIP_BUDGET = 5                    # requests' worth, so a small call is not
 MAX_FAILURES_KEPT = 1_000              # reported in full; the rest are counted only
 _CLIENT_ARGUMENTS = ("key", "url", "model", "pack", "workers", "requests_per_minute",
                      "cache", "dedupe", "transport", "verify", "guidance", "paced",
-                     "limiter")
+                     "limiter", "chars_per_token")
 WINDOW_PER_WORKER = 2                  # requests queued per worker, so a straggler is not a wall
 DRAIN_S = 5.0                          # how long an abandoned run waits for what is still in the air
 
@@ -291,6 +291,7 @@ class Client:
         workers: int = WORKERS,
         requests_per_minute: int = REQUESTS_PER_MINUTE,
         paced: bool = False,
+        chars_per_token: float = CHARS_PER_TOKEN,
         cache: bool = True,
         dedupe: bool = True,
         transport: str = "auto",
@@ -305,6 +306,11 @@ class Client:
         self.model = model
         self.pack = max(1, pack)
         self.workers = max(1, workers)
+        # How many characters the planner assumes a token is worth. 3.5 is
+        # conservative for English against 3.92 measured, and badly wrong for code,
+        # CJK or anything emoji-heavy, where a token can be one character or less.
+        # Lower it there, or requests go out larger than they are supposed to be.
+        self.chars_per_token = max(0.25, chars_per_token)
         self.cache_on = cache
         # Asking the same text twice is usually waste. It is not waste when the
         # repeat is the measurement, so it can be turned off.
@@ -945,8 +951,9 @@ class Client:
             overhead = overheads[index]
             chars = len(asks[index].text) + 12                # the item_N key rides along
             fits = (len(current) < self.pack
-                    and (state_chars + chars) < MAX_STATE_TOKENS * CHARS_PER_TOKEN
-                    and (request_chars + chars + overhead) < MAX_REQUEST_TOKENS * CHARS_PER_TOKEN)
+                    and (state_chars + chars) < MAX_STATE_TOKENS * self.chars_per_token
+                    and (request_chars + chars + overhead)
+                    < MAX_REQUEST_TOKENS * self.chars_per_token)
             if current and not fits:
                 groups.append(current)
                 current, state_chars, request_chars = [], 0, 0
@@ -1004,11 +1011,27 @@ class Client:
         `json.dumps` of the same criteria per item, so four million of them on a
         million rows. Worth about a third of the client's own time.
 
-        `pack` belongs in here. bench_packing.py measures a 3.3 point spread by
-        position within a request, so an answer produced at pack=32 is not the
-        answer you would have got at pack=1, and a cache or a checkpoint that
-        ignores the depth quietly serves one for the other. `guidance` is in for
-        the same reason: a different prompt is a different answer.
+        `pack` is in here as the depth you **asked for**, not the depth the answer
+        came back from, and those are different things. A call of 33 items at
+        pack=32 sends one request of 32 and one of 1, and that lone answer is
+        filed under the same key as the other 32. Ask about it again inside a full
+        pack and the lone answer is what you get.
+
+        That is deliberate, because placement cannot be part of the key: it is not
+        a function of the input. Deduplication and cache hits change the grouping,
+        so the same call made twice can put the same row in a different sized
+        request. A key that depended on placement would miss almost every time and
+        the cache would do nothing.
+
+        What is being traded away is measured rather than assumed. Packed against
+        one per request is **+0.01 points, 95% -0.72 to +0.75** over 1,347
+        completions, and no position effect is detectable at any depth. Every
+        answer carries the depth it actually came from in `Answer.packed`, so a
+        caller who cares can see it, and `cache=False` with `dedupe=False` and no
+        checkpoint is how `bench_packing.py` controls placement when it has to.
+
+        `guidance` is in here for a simpler reason: a different prompt is a
+        different answer, and that one is a function of the input.
         """
         return (self.model, self.pack, self.guidance, instructions,
                 json.dumps(criteria, sort_keys=True), json.dumps(options, sort_keys=True),

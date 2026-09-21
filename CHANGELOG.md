@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.16.0 (2026-09-20)
+
+A review found that `_shape` puts `self.pack` in the cache key and called it a possible correctness
+bug. It reproduces, and the comment next to it was overclaiming.
+
+### Changed
+- **Said what the cache key actually covers.** `pack` is in it as the depth you *asked for*, not the
+  depth an answer came back from. A call of 33 items at `pack=32` sends a request of 32 and a request
+  of 1, and that lone answer is filed under the same key as the other 32: ask again inside a full pack
+  and the lone answer is what you get. Reproduced, and now pinned by a test.
+
+  It stays that way, because placement cannot be part of the key. It is not a function of the input:
+  deduplication and cache hits change the grouping, so the same call made twice can put the same row
+  in a different sized request, and a key that depended on placement would miss almost every time and
+  leave the cache doing nothing.
+
+  What is traded away is measured rather than assumed. Packed against one per request is **+0.01
+  points, 95% −0.72 to +0.75** over 1,347 completions, and no position effect is detectable at any
+  depth. Every answer carries the depth it came from in `Answer.packed`, and `cache=False` with
+  `dedupe=False` and no checkpoint is how `bench_packing.py` controls placement when it must. The
+  comment in `_shape` previously said pack was in the key because an answer at 32 is not the answer
+  you would get at 1, which implied a guarantee the key does not make.
+
+### Added
+- **`chars_per_token`**, because 3.5 is an English number. It is conservative against the 3.92
+  measured on this corpus and badly wrong for code, CJK or emoji-heavy text, where a token can be one
+  character or less, and a planner that guesses high sends requests larger than it thinks.
+
+### Fixed
+- `pyproject.toml` still described **26x** throughput, three headline revisions behind the README.
+- `CONTRIBUTING.md` claimed **36 tests** and carried the same duplicated "no key needed, no key
+  needed" the README had. It no longer states a count, because that is what keeps going stale.
+- CI tested 3.10, 3.12 and 3.13 and skipped **3.11**.
+
+### Known
+`src/jev_ultralightspeed/__init__.py` is 58KB and wants splitting into engine, models, planning and
+transports. That is the next structural job and it is not a good one to rush at the end of a long day
+with 134 tests resting on it.
+
+134 tests, no key and no network needed.
+
 ## v0.15.5 (2026-09-20)
 
 No library change. The demo replays at **4x** rather than 2x, so the default job is fifteen seconds to

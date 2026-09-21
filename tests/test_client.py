@@ -1854,3 +1854,41 @@ def test_a_resumed_score_still_has_its_number(tmp_path):
     assert second.usage.resumed == 2
     assert [a.score for a in answers] == [1.05, 1.05]
     assert [a.label for a in answers] == ["Frustrated", "Frustrated"]
+
+
+def test_the_cache_is_keyed_on_the_pack_you_asked_for_not_the_one_you_got():
+    """
+    Deliberate, and worth pinning rather than leaving to be rediscovered. A call
+    of 33 items at pack=32 sends a request of 32 and a request of 1, and that lone
+    answer is filed under the same key as the other 32.
+
+    Placement cannot be part of the key because it is not a function of the input:
+    deduplication and cache hits change the grouping, so the same call made twice
+    can put the same row in a different sized request. A key that depended on it
+    would miss almost every time. `Answer.packed` is how a caller sees what
+    actually happened.
+    """
+    client = Fake(pack=32)
+    first = client.classify([f"row {n}" for n in range(33)], QUESTION)
+    assert [len(body["state"]) for body in client.sent] == [32, 1]
+    assert first[-1].packed == 1, "the last item rode alone"
+
+    client.sent.clear()
+    again = client.classify(["row 32"] + [f"other {n}" for n in range(31)], QUESTION)
+    assert client.usage.cached == 1, "the lone answer was served into a full pack"
+    assert again[0].packed == 1, "and it still says the depth it was answered at"
+    assert len(client.sent[0]["state"]) == 31, "the other 31 went without it"
+
+
+def test_the_token_estimate_can_be_told_about_denser_text():
+    """3.5 characters a token is an English number. Code and CJK are far denser."""
+    # Distinct, or deduplication collapses them to one and there is nothing to plan.
+    items = ["\u6771\u4eac" * 2_000 + str(n) for n in range(20)]   # 4,000 characters each
+    dense = Fake(pack=64, chars_per_token=1.0)
+    roomy = Fake(pack=64, chars_per_token=3.5)
+    dense.classify(items, QUESTION)
+    roomy.classify(items, QUESTION)
+    biggest_dense = max(len(body["state"]) for body in dense.sent)
+    biggest_roomy = max(len(body["state"]) for body in roomy.sent)
+    assert biggest_dense < biggest_roomy, (biggest_dense, biggest_roomy)
+    assert dense.chars_per_token == 1.0

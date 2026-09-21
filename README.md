@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.15.5** · Apache-2.0 · no required dependencies
+**v0.16.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -349,6 +349,7 @@ it is not: `p` is the probability of **yes**, so 0.01 is a confident no. Rank by
 | `transport` | `auto` | `http2` when httpx is installed, otherwise `threads`. |
 | `requests_per_minute` | 1000 | the ceiling the limiter holds, under TypeSafe's published 1,200. |
 | `paced` | False | spread requests evenly instead of letting a minute's worth go at once. Only useful against a service that throttles short bursts, and see below before turning it on. |
+| `chars_per_token` | 3.5 | what the pack planner assumes a token costs. Conservative for English against 3.92 measured, and badly wrong for code, CJK or emoji-heavy text, where a token can be one character. Lower it there. |
 | `limiter` | its own | hand several clients one ceiling to share. Anything with `take()` and `try_take()` does, so a window held in Redis across machines drops straight in. This library does not ship one of those, it gets out of the way. |
 | `cache` | True | answer repeats from memory, keyed by model, question and text. |
 | `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
@@ -821,6 +822,16 @@ must not be quietly skipped a million times. A test holds that line.
 - **It does not cache across processes unless you ask it to.** The cache lives in the client, in
   memory, bounded at 10,000 entries. A `checkpoint` is the durable version of it, and the two share
   a key.
+- **The cache key holds the `pack` you asked for, not the one an answer came back from.** A call of
+  33 items at `pack=32` sends a request of 32 and a request of 1, and that lone answer is filed under
+  the same key as the other 32; ask again inside a full pack and the lone answer is what you get.
+  Placement cannot be in the key, because it is not a function of the input: deduplication and cache
+  hits change the grouping, so the same call twice can put the same row in a different sized request,
+  and a key that depended on it would miss almost every time. What is traded away is measured rather
+  than assumed: packed against one per request is **+0.01 points, 95% −0.72 to +0.75**, and no
+  position effect is detectable at any depth. Every answer carries the depth it came from in
+  `answer.packed`, and `cache=False` with `dedupe=False` and no checkpoint is how `bench_packing.py`
+  controls placement when it has to.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529, with jitter and the
   server's own `Retry-After` when it sends one; anything else is raised with what the API said. A
   failure that is not going to be skipped abandons the run rather than sending the rest: a wrong
@@ -838,7 +849,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 132 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 134 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python demo.py                                      # the two arms racing, 30s, no key
