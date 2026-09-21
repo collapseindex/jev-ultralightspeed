@@ -121,7 +121,7 @@ def replay(target: int, speed: float) -> None:
         counts[PLAIN] = min(target, plain * elapsed)
         counts[PACKED] = min(target, packed * elapsed)
         draw(elapsed, counts, target, note)
-        time.sleep(0.04)
+        time.sleep(0.03)
     finish(counts, target, elapsed)
 
 
@@ -173,7 +173,7 @@ def finish(counts: dict[str, float], target: int, elapsed: float) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--items", type=int, default=ITEMS)
-    parser.add_argument("--speed", type=float, default=2.0,
+    parser.add_argument("--speed", type=float, default=4.0,
                         help="wind the replay on this much faster than the wall")
     parser.add_argument("--live", action="store_true",
                         help="run both arms against the API, about ten cents")

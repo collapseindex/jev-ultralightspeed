@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.15.5 (2026-09-20)
+
+No library change. The demo replays at **4x** rather than 2x, so the default job is fifteen seconds to
+watch instead of thirty, which is a length a reader will sit through. The frame rate went up with it,
+33 a second against 25, so four times the job per frame still moves smoothly: 460 frames for the run.
+
+Every number on screen is still the job's own time. It finishes in fifteen seconds and says 56.3,
+because 56.3 is what it would take. `--speed 1` for real time, and the footer names the speed either
+way.
+
+132 tests, no key and no network needed.
+
 ## v0.15.4 (2026-09-20)
 
 No library change.

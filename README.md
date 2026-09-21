@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.15.4** · Apache-2.0 · no required dependencies
+**v0.15.5** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -26,14 +26,14 @@ Same ceiling, same model, same question. The time is the part you feel.
 
 ```bash
 python demo.py                 # both arms, no key needed
-python demo.py --speed 1       # in real time rather than at 2x
+python demo.py --speed 1       # in real time rather than at 4x
 python demo.py --items 4000    # a shorter one
 ```
 
 Two counters against the same rate limit, running until the packed arm has finished the job:
 **30,000 judgements in 56 seconds, against 938** for the other one. The same 32 as everything else
-here, arriving where you can watch it. The replay runs at twice the wall clock so it takes half a
-minute to watch, and every number on screen is still the job's own time.
+here, arriving where you can watch it. The replay runs at four times the wall clock, so watching it
+takes fifteen seconds, and every number on screen is still the job's own time.
 
 **Not for one item at a time.** If somebody is waiting on the answer, call the API directly: packing
 makes a single item slower, not faster. This is for a queue.
