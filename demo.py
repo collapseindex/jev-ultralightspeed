@@ -29,6 +29,7 @@ CEILING = 1_000                  # requests a minute, the client's default
 PACK = 32
 ITEMS = 30_000
 BAR = 24
+EIGHTHS = " ▏▎▍▌▋▊▉"
 PLAIN, PACKED = "regular jev", "ultralightspeed jev"
 GREY, BLUE, WHITE, DIM, OFF = "\033[38;5;244m", "\033[38;5;45m", "\033[97m", "\033[2m", "\033[0m"
 
@@ -45,16 +46,26 @@ SANIC = [line.ljust(15) for line in [
 ]]
 
 
-def _bars() -> tuple[str, str]:
+def _bars() -> tuple[str, str, str]:
     """Blocks where the terminal can take them, hashes where it cannot."""
     try:
-        "█░".encode(sys.stdout.encoding or "utf-8")
-        return "█", "░"
+        ("█░" + EIGHTHS).encode(sys.stdout.encoding or "utf-8")
+        return "█", "░", EIGHTHS
     except (UnicodeEncodeError, LookupError, TypeError):
-        return "#", "."
+        return "#", ".", " "
 
 
-FULL, EMPTY = _bars()
+FULL, EMPTY, PARTS = _bars()
+
+
+def bar_for(share: float, width: int) -> str:
+    """A bar filled to the nearest eighth of a cell, then padded out."""
+    cells = max(0.0, min(1.0, share)) * width
+    whole = int(cells)
+    sliver = PARTS[int((cells - whole) * len(PARTS))] if whole < width else ""
+    if not sliver.strip():          # under an eighth is nothing, not a space
+        sliver = ""
+    return FULL * whole + sliver + EMPTY * (width - whole - len(sliver))
 
 
 def a_million(rate: float) -> str:
@@ -79,9 +90,8 @@ def draw(elapsed: float, counts: dict[str, float], target: int, note: str) -> No
     for name in (PLAIN, PACKED):
         done = counts[name]
         share = min(1.0, done / target)
-        filled = round(BAR * share)
         colour = BLUE if name == PACKED else GREY
-        bar = colour + FULL * filled + DIM + EMPTY * (BAR - filled) + OFF
+        bar = colour + bar_for(share, BAR) + OFF
         rate = done / elapsed if elapsed else 0.0
         out.append(f"  {WHITE}{name:<21}{OFF}{bar} {done:>7,.0f} {rate:>6.0f}/s {share:>5.0%}")
         out.append(f"  {DIM}{'':<21}a million would take {a_million(rate)}{OFF}")
@@ -90,19 +100,29 @@ def draw(elapsed: float, counts: dict[str, float], target: int, note: str) -> No
     sys.stdout.flush()
 
 
-def replay(target: int) -> None:
-    """The recorded run. Both rates are what the benchmark measured."""
+def replay(target: int, speed: float) -> None:
+    """
+    The recorded run. Both rates are what the benchmark measured.
+
+    `speed` winds the clock on faster than the wall, which is for watching and
+    for recording. Every number on screen is still the job's own time, so a run
+    shown in 28 seconds still says it took 56.
+    """
     plain = 30_000 / 1801.3                       # the unpacked arm, 16.7 a second
     packed = PACK * CEILING / 60                  # what the ceiling allows at pack=32
     counts = {PLAIN: 0.0, PACKED: 0.0}
+    note = "replayed from data/results. Nothing here is invented."
+    if speed != 1.0:
+        note = f"replayed from data/results at {speed:g}x. The times shown are the job's own."
     started = time.monotonic()
+    elapsed = 0.0
     while counts[PACKED] < target:
-        elapsed = time.monotonic() - started
+        elapsed = (time.monotonic() - started) * speed
         counts[PLAIN] = min(target, plain * elapsed)
         counts[PACKED] = min(target, packed * elapsed)
-        draw(elapsed, counts, target, "replayed from data/results. Nothing here is invented.")
-        time.sleep(0.08)
-    finish(counts, target, time.monotonic() - started)
+        draw(elapsed, counts, target, note)
+        time.sleep(0.04)
+    finish(counts, target, elapsed)
 
 
 def live(target: int) -> None:
@@ -153,6 +173,8 @@ def finish(counts: dict[str, float], target: int, elapsed: float) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--items", type=int, default=ITEMS)
+    parser.add_argument("--speed", type=float, default=2.0,
+                        help="wind the replay on this much faster than the wall")
     parser.add_argument("--live", action="store_true",
                         help="run both arms against the API, about ten cents")
     arguments = parser.parse_args()
@@ -162,10 +184,10 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
         pass
-    global FULL, EMPTY
-    FULL, EMPTY = _bars()
+    global FULL, EMPTY, PARTS
+    FULL, EMPTY, PARTS = _bars()
     try:
-        live(arguments.items) if arguments.live else replay(arguments.items)
+        live(arguments.items) if arguments.live else replay(arguments.items, arguments.speed)
     except KeyboardInterrupt:
         print()
     return 0

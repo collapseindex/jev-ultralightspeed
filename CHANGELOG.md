@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.15.4 (2026-09-20)
+
+No library change.
+
+### Changed
+- **The demo's bars fill by eighths of a cell.** Twenty-four cells meant a step every 4.2%, so the
+  slower arm sat still for seconds at a time. 192 steps now, and it creeps the way it should.
+- **The replay runs at twice the wall clock**, so the default job is half a minute to watch rather
+  than a minute. Every number on screen is still the job's own time: it finishes in 28 seconds and
+  says 56, because 56 is what it would take. `--speed 1` for real time.
+- A bar could come out one cell too wide when the fill was under an eighth, because the blank eighth
+  was drawn and then not counted.
+
+132 tests, no key and no network needed.
+
 ## v0.15.3 (2026-09-20)
 
 No library change. Four things wrong with the demo, all of them found by running it.
