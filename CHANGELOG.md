@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.22.0 (2026-09-21)
+
+`calibrate(accuracy=...)` gave you a cut whose *observed* rate hit the bar on your rows. That is an
+estimate, and an estimate lands on the bar rather than above it, so a cut deployed from one runs
+under it about half the time. Now it can give you a bound instead.
+
+### Added
+- **`confidence=` on `calibrate` and `Calibration.from_answers`.** With it, the cut has to clear the
+  target on the low end of a Wilson interval rather than on the rate the sample happened to show. It
+  cuts higher, keeps less, and lands above the bar. One of 0.5, 0.8, 0.9, 0.95 or 0.99.
+
+  Measured on a simulated judge over 4,000 rows at a 95% bar: the default lands at 95.0% held out,
+  which is to say exactly on the bar, and 95% confidence lands at 97.8%. The cost is coverage, which
+  is the honest trade and is now yours to make rather than made for you.
+
+  It applies to `accuracy=` only. With `keep=` the cut is set by the share you asked to keep, so
+  there is no bar to be confident about, and asking for both is refused rather than ignored.
+
+- **`Calibration.headroom`**: the coverage the observed rate would have allowed, minus what the
+  bound allows. What the safety margin is costing you right now. Wide means more labels would buy
+  coverage back; narrow means your rows have already given up everything they have. Zero without a
+  bound, since there is nothing to compare against.
+
+### Fixed
+- **The "no cut reaches" refusal contradicted itself under a bound**, reporting a best observed rate
+  of 100% while refusing to certify anything at all. It is now quoted on the footing the search
+  actually used, and when rows rather than the judge are the binding constraint it says so, because
+  at a few hundred rows they usually are.
+
+### Unchanged
+The default. No `confidence` means the old behaviour exactly, so nothing that worked yesterday moves
+today. The docs are clearer that it is an estimate, and that `Calibration.accuracy` from the held-out
+splits is the number to plan with either way.
+
+199 tests, four Pythons, three operating systems, a linter, and a volume job.
+
 ## v0.21.0 (2026-09-21)
 
 `calibrate` used to answer "where do I cut" without first asking whether a cut could mean anything.

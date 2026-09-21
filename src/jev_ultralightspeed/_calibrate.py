@@ -27,6 +27,7 @@ come back as notes rather than as a confident number.
 
 from __future__ import annotations
 
+import math
 import random
 import statistics
 from collections.abc import Sequence
@@ -49,6 +50,9 @@ SEED = 7
 # deliberately with `min_signal` if you know your ranking is faint and you want
 # the number anyway.
 MIN_SIGNAL = 0.60
+# z for a one-sided bound at a few ordinary confidence levels. Anything else
+# is interpolated badly, so these are the ones offered.
+Z_FOR = {0.50: 0.0, 0.80: 0.84, 0.90: 1.28, 0.95: 1.645, 0.99: 2.33}
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,7 @@ class Calibration:
     items: int
     splits: int
     discrimination: float = 0.0
+    headroom: float = 0.0
     notes: tuple[str, ...] = ()
 
     @property
@@ -96,14 +101,16 @@ class Calibration:
     def from_answers(cls, answers: Sequence[Answer], gold: Sequence[str], *,
                      keep: float | None = None, accuracy: float | None = None,
                      splits: int = SPLITS, seed: int = SEED,
-                     min_signal: float = MIN_SIGNAL) -> Calibration:
+                     min_signal: float = MIN_SIGNAL,
+                     confidence: float = 0.0) -> Calibration:
         """
         The same thing on answers you already have, which costs nothing.
 
         Use this to re-cut a finished run at a different target, or to calibrate
         without asking twice.
         """
-        return _work(list(answers), list(gold), keep, accuracy, splits, seed, min_signal)
+        return _work(list(answers), list(gold), keep, accuracy, splits, seed, min_signal,
+                     confidence)
 
 
 def calibrate(items: Sequence[str], gold: Sequence[str], instructions: str, *,
@@ -111,7 +118,8 @@ def calibrate(items: Sequence[str], gold: Sequence[str], instructions: str, *,
               criteria: dict | None = None, options: dict | None = None,
               levels: Sequence[str] | None = None,
               client=None, splits: int = SPLITS, seed: int = SEED,
-              min_signal: float = MIN_SIGNAL) -> Calibration:
+              min_signal: float = MIN_SIGNAL,
+              confidence: float = 0.0) -> Calibration:
     """
     Ask the judge about labelled rows, then find the cut worth trusting.
 
@@ -142,7 +150,7 @@ def calibrate(items: Sequence[str], gold: Sequence[str], instructions: str, *,
     finally:
         if own:
             client.close()
-    return _work(answers, list(gold), keep, accuracy, splits, seed, min_signal)
+    return _work(answers, list(gold), keep, accuracy, splits, seed, min_signal, confidence)
 
 
 # -- the arithmetic ----------------------------------------------------------
@@ -205,7 +213,24 @@ def _cut_for_keep(rows: list[tuple[float, float]], keep: float) -> float:
     return ranked[min(len(ranked) - 1, max(0, int(len(ranked) * keep) - 1))]
 
 
-def _cut_for_accuracy(rows: list[tuple[float, float]], target: float) -> float | None:
+def _wilson_lower(hat: float, total: int, z: float) -> float:
+    """
+    The low end of a confidence interval on a proportion.
+
+    Wilson rather than the textbook normal interval, because at a few hundred
+    rows and at proportions near one, which is exactly where a threshold lives,
+    the normal interval runs off the end and claims coverage it has not got.
+    """
+    if total <= 0:
+        return 0.0
+    denominator = 1 + z * z / total
+    centre = hat + z * z / (2 * total)
+    spread = z * math.sqrt(hat * (1 - hat) / total + z * z / (4 * total * total))
+    return max(0.0, (centre - spread) / denominator)
+
+
+def _cut_for_accuracy(rows: list[tuple[float, float]], target: float,
+                      z: float = 0.0) -> float | None:
     """
     The lowest cut that still reaches `target`, so the most rows kept.
 
@@ -214,13 +239,22 @@ def _cut_for_accuracy(rows: list[tuple[float, float]], target: float) -> float |
     that qualifies rather than stopping at the first that fails. Prefixes shorter
     than FLOOR are not eligible: a handful of the judge's surest answers are all
     correct often enough to look like any target you ask for.
+
+    With `z` above zero the prefix has to clear the bar on the low end of a
+    confidence interval rather than on the observed rate. That is the difference
+    between "these rows scored 95% here" and "these rows will score 95%", and it
+    is not a small one: a cut fitted to the observed rate overshoots by however
+    much the sample happened to flatter it, which is about half the time.
     """
     ranked = sorted(rows, key=lambda row: -row[0])
     right = 0.0
     best: float | None = None
     for taken, (certainty, correct) in enumerate(ranked, start=1):
         right += correct
-        if taken >= FLOOR and right / taken >= target:
+        if taken < FLOOR:
+            continue
+        reached = _wilson_lower(right / taken, taken, z) if z > 0 else right / taken
+        if reached >= target:
             best = certainty
     return best
 
@@ -235,9 +269,15 @@ def _at(rows: list[tuple[float, float]], cut: float) -> tuple[float, float]:
 
 def _work(answers: list[Answer], gold: list[str], keep: float | None,
           accuracy: float | None, splits: int, seed: int,
-          min_signal: float) -> Calibration:
+          min_signal: float, confidence: float = 0.0) -> Calibration:
     if (keep is None) == (accuracy is None):
         raise JevError("say one of keep or accuracy, not both and not neither")
+    if confidence and confidence not in Z_FOR:
+        raise JevError(f"confidence is one of {sorted(Z_FOR)}, not {confidence}")
+    if confidence and keep is not None:
+        raise JevError("confidence applies to accuracy=, not keep=: with keep the cut is set "
+                       "by the share you asked to keep, so there is no bar to be confident about")
+    z = Z_FOR.get(confidence or 0.0, 0.0)
     for name, value in (("keep", keep), ("accuracy", accuracy)):
         if value is not None and not 0.0 < value <= 1.0:
             raise JevError(f"{name} is a fraction above 0 and up to 1")
@@ -277,14 +317,40 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
     if keep is not None:
         cut = _cut_for_keep(rows, keep)
     else:
-        found = _cut_for_accuracy(rows, accuracy)
+        found = _cut_for_accuracy(rows, accuracy, z)
         if found is None:
-            best = max((_at(rows, certainty)[1] for certainty, _ in rows), default=0.0)
+            # Reported on the same footing the search used, or the message
+            # contradicts itself: with a bound in play the best observed rate can
+            # read 100% while nothing at all is certifiable.
+            ranked = sorted(rows, key=lambda row: -row[0])
+            right, best = 0.0, 0.0
+            for taken, (_certainty, correct) in enumerate(ranked, start=1):
+                right += correct
+                if taken >= FLOOR:
+                    best = max(best, _wilson_lower(right / taken, taken, z) if z > 0
+                               else right / taken)
+            if z > 0:
+                raise JevError(
+                    f"no cut clears {accuracy:.0%} with {confidence:.0%} confidence on these "
+                    f"rows. The best any of them can guarantee over at least {FLOOR} kept is "
+                    f"{best:.1%}, and the observed rate is higher than that. At {len(rows):,} "
+                    f"rows the binding constraint is usually the count rather than the judge, "
+                    f"since a bound this tight needs more of them. Ask for less, lower the "
+                    f"confidence, or label more rows")
             raise JevError(
                 f"no cut reaches {accuracy:.0%} on these rows; the best any of them manages "
                 f"over at least {FLOOR} kept is {best:.1%}. Ask for less, or the judge is not "
                 f"good enough at this question to be trusted at that bar")
         cut = found
+
+    # What the safety margin is costing, if one was asked for. Wide means the
+    # bound is what is holding coverage back and more labels would move it;
+    # narrow means the data has already given up everything it has.
+    headroom = 0.0
+    if z > 0 and accuracy is not None:
+        loose = _cut_for_accuracy(rows, accuracy, 0.0)
+        if loose is not None:
+            headroom = max(0.0, _at(rows, loose)[0] - _at(rows, cut)[0])
 
     # What to expect from it is measured on rows it was not chosen on, many times,
     # because one split of a few hundred rows is mostly luck.
@@ -299,7 +365,7 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
         if keep is not None:
             edge = _cut_for_keep(fit, keep)
         else:
-            edge = _cut_for_accuracy(fit, accuracy)
+            edge = _cut_for_accuracy(fit, accuracy, z)
             if edge is None:
                 continue
         covered, scored = _at(test, edge)
@@ -311,7 +377,7 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
         notes.append("no held-out split could find this cut, so there is no estimate "
                      "of what it does on rows it has not seen")
         return Calibration(cut, *_at(rows, cut), 0.0, 0.0, baseline,
-                           len(rows), 0, separates, tuple(notes))
+                           len(rows), 0, separates, headroom, tuple(notes))
 
     scores.sort()
     edge = max(0, int(len(scores) * 0.05) - 1) if len(scores) >= 20 else 0
@@ -345,4 +411,4 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
     return Calibration(cut=cut, coverage=statistics.median(coverages),
                        accuracy=statistics.median(scores), low=low, high=high,
                        baseline=baseline, items=len(rows), splits=len(scores),
-                       discrimination=separates, notes=tuple(notes))
+                       discrimination=separates, headroom=headroom, notes=tuple(notes))

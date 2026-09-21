@@ -107,6 +107,70 @@ def test_a_real_signal_is_not_refused_and_is_reported():
     assert f"{cal.discrimination:.3f}" in str(cal), "printing it should show the number"
 
 
+def test_a_bound_lands_above_the_bar_where_an_estimate_lands_on_it():
+    """
+    The difference between "these rows scored 95% here" and "these rows will
+    score 95%".
+
+    Without `confidence` the cut is the longest prefix whose observed rate hits
+    the target, which overshoots by however much the sample flattered it, so the
+    held-out figure sits on the bar and deployment is a coin flip either side of
+    it. With a bound it sits above.
+    """
+    answers, gold = a_judge(4_000, honest=True)
+    estimate = Calibration.from_answers(answers, gold, accuracy=0.95)
+    bounded = Calibration.from_answers(answers, gold, accuracy=0.95, confidence=0.95)
+
+    assert bounded.cut > estimate.cut, "a bound has to cut higher than an estimate"
+    assert bounded.coverage < estimate.coverage, "and therefore keep less"
+    assert bounded.accuracy > estimate.accuracy, "and land further above the bar"
+
+
+def test_more_confidence_cuts_higher():
+    answers, gold = a_judge(4_000, honest=True)
+    cuts = [Calibration.from_answers(answers, gold, accuracy=0.95, confidence=c).cut
+            for c in (0.80, 0.90, 0.95, 0.99)]
+    assert cuts == sorted(cuts), f"cuts should rise with confidence, got {cuts}"
+
+
+def test_headroom_says_whether_the_margin_is_what_is_holding_coverage_back():
+    """
+    Wide headroom means the bound is the constraint and more labels would move
+    it. Nothing to compare against without a bound, so it stays at zero.
+    """
+    answers, gold = a_judge(4_000, honest=True)
+    assert Calibration.from_answers(answers, gold, accuracy=0.95).headroom == 0.0
+    bounded = Calibration.from_answers(answers, gold, accuracy=0.95, confidence=0.99)
+    assert bounded.headroom > 0.0
+
+
+def test_too_few_rows_to_certify_says_so_on_its_own_terms():
+    """
+    The message has to be quoted on the footing the search used. Reporting the
+    observed rate while refusing on the bound reads as a contradiction: nothing
+    is certifiable, and yet the best manages 100%.
+    """
+    answers, gold = a_judge(400, honest=True)
+    with pytest.raises(JevError) as raised:
+        Calibration.from_answers(answers, gold, accuracy=0.95, confidence=0.99)
+    said = str(raised.value)
+    assert "guarantee" in said
+    assert "400 rows" in said, "it should name the count, which is usually the constraint"
+
+
+@pytest.mark.parametrize("bad", [0.77, 0.5001, 1.0])
+def test_an_unsupported_confidence_is_refused_with_the_list(bad):
+    answers, gold = a_judge(600, honest=True)
+    with pytest.raises(JevError, match="confidence is one of"):
+        Calibration.from_answers(answers, gold, accuracy=0.95, confidence=bad)
+
+
+def test_confidence_with_keep_is_refused_because_there_is_no_bar():
+    answers, gold = a_judge(600, honest=True)
+    with pytest.raises(JevError, match="applies to accuracy"):
+        Calibration.from_answers(answers, gold, keep=0.8, confidence=0.95)
+
+
 def test_it_finds_a_cut_that_is_really_there():
     answers, gold = a_judge(2_000, honest=True)
     cal = Calibration.from_answers(answers, gold, keep=0.8)

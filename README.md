@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 [![Python](https://img.shields.io/pypi/pyversions/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 
-**v0.21.0** · Apache-2.0 · no required dependencies
+**v0.22.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -879,6 +879,32 @@ worth more than any number in this README.
 On a run that clears the bar, the figure comes back on the result (`cal.discrimination`) and prints
 with it, so you can see how much the cut had to work with.
 
+#### An estimate, or a guarantee
+
+By default `accuracy=0.95` finds the longest prefix whose **observed** rate hits 95% on your rows.
+That overshoots by however much the sample happened to flatter it, so the cut lands *on* the bar and
+deployment is a coin flip either side. `Calibration.accuracy` reports that honestly, which is why
+the held-out figure is the one to plan with.
+
+When the cut runs unattended and the bar is a promise rather than a hope, ask for a bound instead:
+
+```python
+cal = calibrate(rows, labels, question, accuracy=0.95, confidence=0.95)
+```
+
+It then picks the lowest cut that clears 95% on the **low end of a Wilson interval**, so it cuts
+higher, keeps less, and lands above the bar rather than on it. Confidence is one of 0.5, 0.8, 0.9,
+0.95 or 0.99, and it applies to `accuracy=` only: with `keep=` the cut is set by the share you asked
+to keep, so there is no bar to be confident about.
+
+It will refuse when your rows cannot support the bound, and say so in the bound's own terms rather
+than quoting an observed rate that looks like it contradicts the refusal. At a few hundred rows the
+binding constraint is usually the count, not the judge.
+
+`cal.headroom` is what the margin is costing: the coverage the observed rate would have allowed,
+minus what the bound allows. Wide means more labels would buy you coverage. Narrow means the data
+has already given up everything it has.
+
 ### Carrying the question once
 
 ```python
@@ -1033,7 +1059,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 191 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 199 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench/eval.py            # the table above, ~35 min, ~$1.20
