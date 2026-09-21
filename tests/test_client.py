@@ -1478,7 +1478,11 @@ def test_a_paced_limiter_puts_a_floor_under_the_gap():
     limiter = _Limiter(600, paced=True)          # a tenth of a second apart
     assert limiter.try_take() == 0.0
     wait = limiter.try_take()
-    assert 0.0 < wait <= 0.1, wait
+    # A hair over the interval is fine and does happen: where the clock is coarse
+    # enough that both reads land on the same instant, the answer is
+    # (now + 0.1) - now, which in floating point is 0.10000000000002274 for a
+    # `now` the size of an uptime. Windows CI found that; Linux never did.
+    assert 0.0 < wait <= 0.1 + 1e-6, wait
     time.sleep(wait)
     assert limiter.try_take() == 0.0
 
