@@ -231,7 +231,7 @@ def client_context(ca_path) -> ssl.SSLContext:
     return context
 
 
-def intercepted(server: "H2Server") -> str:
+def intercepted(server: H2Server) -> str:
     """
     Empty when the server's own certificate is what a client sees, otherwise who
     is standing in the way.

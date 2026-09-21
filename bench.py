@@ -26,7 +26,7 @@ import time
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client  # noqa: E402
 
 QUESTION = "Does this message need a human to act on it today?"
 CRITERIA = {
@@ -123,7 +123,7 @@ def main() -> int:
 
     baseline: dict[str, float] = {}
     rows = []
-    order = [(name, pack, workers) for name, pack, workers in shapes for _ in range(arguments.rounds)]
+    order = [shape for shape in shapes for _ in range(arguments.rounds)]
     random.shuffle(order)
     collected: dict[str, list] = {}
 
@@ -155,7 +155,8 @@ def main() -> int:
             checked = [a for a in answers if a.item in baseline]
             if not checked:
                 continue
-            same.append(sum(1 for a in checked if (a.p >= 0.5) == (baseline[a.item] >= 0.5)) / len(checked))
+            agreed = sum(1 for a in checked if (a.p >= 0.5) == (baseline[a.item] >= 0.5))
+            same.append(agreed / len(checked))
             moved.append(statistics.mean(abs(a.p - baseline[a.item]) for a in checked))
         agreement = (f"{statistics.mean(same) * 100:.1f}% same, move {statistics.mean(moved):.3f}"
                      if same else "baseline")

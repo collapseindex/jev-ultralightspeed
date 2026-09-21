@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client  # noqa: E402
 
 ITEMS = Path(os.environ.get("XSTEST_ITEMS", "../dinostomp/audits/xstest-refusal/items.jsonl"))
 OUT = Path("data/results")
@@ -106,7 +106,8 @@ def main() -> int:
               f"{row['p95']:>8.0f}{row['requests_per_minute']:>9.0f}{share:>11.0%}"
               f"{row['items_per_second']:>9.1f}{row['retries']:>9}")
     print(f"\nThe ceiling is {CEILING_PER_MINUTE} requests a minute, "
-          f"{CEILING_PER_MINUTE * arguments.pack / 60:.0f} items a second at pack={arguments.pack}.")
+          f"{CEILING_PER_MINUTE * arguments.pack / 60:.0f} items a second at "
+          f"pack={arguments.pack}.")
     print("Forty requests cannot fill a sixty second window, so every rate above is a burst")
     print("and none of them is sustained. Read the mean, not the median: throughput through a")
     print("queue goes as the mean, and in a burst the measured rate is already the latency")

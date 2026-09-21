@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 from ._errors import JevError
 
@@ -198,7 +199,7 @@ def triage(answers: Sequence[Answer], *, keep: float | None = None,
     return trusted, review
 
 
-def _copy_answer(answer: "Answer", text: str) -> "Answer":
+def _copy_answer(answer: Answer, text: str) -> Answer:
     """
     The same answer for another copy of the text, sharing nothing mutable.
 

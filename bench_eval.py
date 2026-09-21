@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client, REQUESTS_PER_MINUTE, _Limiter                                   # noqa: E402
+from jev_ultralightspeed import REQUESTS_PER_MINUTE, Client, _Limiter  # noqa: E402
 
 # dinostomp's xstest-refusal pod: 1,347 completions labelled by two human
 # annotators. Clone it beside this repo, or point ITEMS somewhere else.
@@ -75,7 +75,7 @@ def bootstrap_interval(values, statistic, rounds=2000, seed=13):
 def by_item(labels, gold, source, unique):
     """Each completion's own accuracy, averaged over the times it was seen."""
     hits = defaultdict(list)
-    for label, want, index in zip(labels, gold, source):
+    for label, want, index in zip(labels, gold, source, strict=False):
         hits[index].append(1.0 if label == want else 0.0)
     return [statistics.mean(hits[index]) for index in range(unique) if hits[index]]
 
@@ -115,7 +115,7 @@ def arm(name, texts, gold, source, unique, *, pack, workers, limiter, blocks=BLO
     low, high = bootstrap_interval(per_item, statistics.mean)
     # The same completion, seen many times, answered the same way.
     seen = defaultdict(Counter)
-    for index, label in zip(source, labels):
+    for index, label in zip(source, labels, strict=False):
         seen[index][label] += 1
     steady = statistics.mean(counter.most_common(1)[0][1] / sum(counter.values())
                              for counter in seen.values())
@@ -163,7 +163,7 @@ def main():
 
     # Paired, because both arms judged the same completions: the quantity of
     # interest is the difference per completion, not two separate averages.
-    differences = [f - s for f, s in zip(fast["per_item"], slow["per_item"])]
+    differences = [f - s for f, s in zip(fast["per_item"], slow["per_item"], strict=False)]
     gap = statistics.mean(differences)
     low, high = bootstrap_interval(differences, statistics.mean)
     # The claim is arithmetic and always was. Under a ceiling counted in requests,
@@ -172,7 +172,7 @@ def main():
     ratio = fast["pack"] / slow["pack"]
     print(f"\n**{ratio:.1f}x the throughput**, which is the pack depth, and "
           f"{(1 - fast['usd'] / slow['usd']) * 100:.0f}% less money, which is measured.")
-    print(f"\nWhat the arms actually did, and why neither rate is the claim:")
+    print("\nWhat the arms actually did, and why neither rate is the claim:")
     for result in (slow, fast):
         print(f"  {result['name']:<22}{result['rate']:>8.1f} items/s at "
               f"{result['per_minute']:>6.0f} requests/min"
@@ -188,14 +188,16 @@ def main():
               f"{fast['rate']:.1f}\n  items/s is borrowed. Alone at the ceiling it would do "
               f"{fast['alone']:.0f}.")
     if slow["per_minute"] > REQUESTS_PER_MINUTE * 1.05:
-        print(f"  The unpacked arm went over its share, so its rate is borrowed too.")
+        print("  The unpacked arm went over its share, so its rate is borrowed too.")
     print(f"accuracy difference, packed minus one per request, paired over {unique:,} completions: "
           f"{gap * 100:+.2f} points, 95% {low * 100:+.2f} to {high * 100:+.2f}")
     margin = 0.02
     within = low > -margin and high < margin
+    verdict = ('no difference worth caring about at this sample size' if within
+               else 'a difference this run cannot rule out')
     print(f"{'inside' if within else 'NOT inside'} a {margin * 100:.0f} point margin, "
           f"so the honest claim is "
-          f"{'no difference worth caring about at this sample size' if within else 'a difference this run cannot rule out'}.\n")
+          f"{verdict}.\n")
 
 
 if __name__ == "__main__":

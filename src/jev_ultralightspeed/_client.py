@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import os
-import socket
 import ssl
 import threading
 import time
 import urllib.parse
 from collections import OrderedDict, deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as wait_for
-from typing import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for
 
 from . import _http2
 from ._answers import Answer, Ask, Usage, _Ask, _copy_answer, _read
@@ -20,11 +21,40 @@ from ._errors import JevError
 from ._ledger import Ledger
 from ._limits import _Limiter
 from ._protocol import _clean, _one_body, _packed_body, _question
-from ._settings import (CHARS_PER_TOKEN, DRAIN_S, MAX_FAILURES_KEPT,
-                        MAX_LATENCIES, MAX_REQUEST_TOKENS, MAX_RETRIES, MAX_STATE_TOKENS,
-                        MIN_SKIP_BUDGET, MODEL, PACK, REQUESTS_PER_MINUTE, RETRY_STATUSES,
-                        SKIP_FRACTION, SSL_CONTEXT, TIMEOUT_S, URL, WARM_TIMEOUT_S,
-                        WINDOW_PER_WORKER, WORKERS, _CLIENT_ARGUMENTS)
+from ._settings import (
+    _CLIENT_ARGUMENTS,
+    CHARS_PER_TOKEN,
+    DRAIN_S,
+    MAX_FAILURES_KEPT,
+    MAX_LATENCIES,
+    MAX_REQUEST_TOKENS,
+    MAX_RETRIES,
+    MAX_STATE_TOKENS,
+    MIN_SKIP_BUDGET,
+    MODEL,
+    PACK,
+    REQUESTS_PER_MINUTE,
+    RETRY_STATUSES,
+    SKIP_FRACTION,
+    SSL_CONTEXT,
+    TIMEOUT_S,
+    URL,
+    WARM_TIMEOUT_S,
+    WINDOW_PER_WORKER,
+    WORKERS,
+)
+
+
+def _this_machine(host: str | None) -> bool:
+    """Whether a hostname means the machine the client is running on."""
+    if not host:
+        return False
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 class Client:
@@ -45,12 +75,22 @@ class Client:
         dedupe: bool = True,
         transport: str = "auto",
         verify: str | os.PathLike | ssl.SSLContext | None = None,
+        allow_insecure_http: bool = False,
         guidance: str = "repeat",
         limiter=None,
     ) -> None:
         self.key = key or os.environ.get("TYPESAFE_API_KEY", "")
         if not self.key:
             raise JevError("no key: pass one, or set TYPESAFE_API_KEY")
+        # A bearer token over plain http is a key read by anything on the path,
+        # and the way that happens is a typo in a hostname rather than a decision.
+        # Loopback is allowed because that is a test double or a local gateway,
+        # and those are the only http URLs anybody means.
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme == "http" and not allow_insecure_http and not _this_machine(parts.hostname):
+            raise JevError(
+                f"{url} is plain http to {parts.hostname}, which is not this machine, and the "
+                f"key would go out in the clear. Use https, or pass allow_insecure_http=True.")
         self.url = url
         self.model = model
         self.pack = max(1, pack)
@@ -171,7 +211,7 @@ class Client:
                                    f"{payload.decode('utf-8', 'replace')[:300]}")
                 wait = _http2._backoff(attempt, hint)
                 self._count_retry(answer.status, wait)
-            except (http.client.HTTPException, socket.error, ssl.SSLError, TimeoutError) as error:
+            except (OSError, http.client.HTTPException, ssl.SSLError, TimeoutError) as error:
                 self._drop_connection()
                 if attempt == MAX_RETRIES - 1:
                     raise JevError(f"could not reach Jev: {error}") from error
@@ -180,7 +220,7 @@ class Client:
             time.sleep(wait)                    # jittered, and the server's hint when it gave one
         raise JevError("out of retries")
 
-    def _pipe_for(self) -> "_http2.Pipe":
+    def _pipe_for(self) -> _http2.Pipe:
         if self._pipe is None:
             self._pipe = _http2.Pipe(self.url, self.key, inflight=self.workers,
                                      timeout=TIMEOUT_S, retry_statuses=RETRY_STATUSES,
@@ -234,7 +274,7 @@ class Client:
         list(pool.map(open_one, range(self.workers)))
 
     # -- the useful call ---------------------------------------------------
-    def __enter__(self) -> "Client":
+    def __enter__(self) -> Client:
         return self
 
     def __exit__(self, *_) -> None:
@@ -398,7 +438,7 @@ class Client:
             prepared.append(_Ask(_clean(ask.item, index), *settled))
         return list(self._answers_for(prepared, on_progress, checkpoint, on_error))
 
-    def _asks(self, items, instructions, criteria, options, levels=None) -> list["_Ask"]:
+    def _asks(self, items, instructions, criteria, options, levels=None) -> list[_Ask]:
         """
         The same question against every item, which is what `classify` means.
 
@@ -557,7 +597,7 @@ class Client:
                         here = [self._gave_up(texts[index], str(error), position, len(group))
                                 for position, index in enumerate(group, start=1)]
                     self._bank(ledger, group, texts, here, shapes)
-                    for index, answer in zip(group, here):
+                    for index, answer in zip(group, here, strict=True):
                         settle(index, answer)
                     done += len(here)
                     if on_progress:
@@ -603,7 +643,7 @@ class Client:
             self.usage.seconds += time.monotonic() - started
 
     # -- the parts ---------------------------------------------------------
-    def _body(self, asks: Sequence["_Ask"]) -> dict:
+    def _body(self, asks: Sequence[_Ask]) -> dict:
         return (_one_body(self.model, asks[0]) if len(asks) == 1
                 else _packed_body(self.model, asks, self.guidance))
 
@@ -613,7 +653,7 @@ class Client:
             raise JevError(f"Jev did not answer item_{position} of a packed request")
         return entry
 
-    def _ask_group(self, asks: Sequence["_Ask"], spare=None) -> list[Answer]:
+    def _ask_group(self, asks: Sequence[_Ask], spare=None) -> list[Answer]:
         data = self.ask(self._body(asks))
         self._count(data)
         return self._read_all(data, [ask.text for ask in asks], spare)
@@ -672,7 +712,7 @@ class Client:
             if len(self.latencies) > MAX_LATENCIES:
                 del self.latencies[:len(self.latencies) - MAX_LATENCIES]
 
-    def _overhead(self, ask: "_Ask") -> int:
+    def _overhead(self, ask: _Ask) -> int:
         """Characters one item's question adds to a request, before its text."""
         if self.guidance == "once":
             return len(json.dumps(_question("Judge item_00 only, ignoring every other item, "
@@ -721,7 +761,7 @@ class Client:
         """
         if ledger is None:
             return
-        for index, answer in zip(group, answers):
+        for index, answer in zip(group, answers, strict=True):
             if answer.ok:
                 ledger.record(self._key(texts[index], shapes[index]), answer)
 

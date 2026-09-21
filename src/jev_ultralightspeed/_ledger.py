@@ -92,7 +92,8 @@ class Ledger:
             for line in handle:
                 found = _key_in(line)
                 if found is not None:
-                    self._at[found] = offset       # a later line wins, which is what re-asking means
+                    # A later line wins, which is what asking again means.
+                    self._at[found] = offset
                 offset += len(line)
 
         # A crash can leave the last line half written. One newline repairs it,

@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.16.1** · Apache-2.0 · no required dependencies
+**v0.17.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -354,7 +354,7 @@ it is not: `p` is the probability of **yes**, so 0.01 is a confident no. Rank by
 | `cache` | True | answer repeats from memory, keyed by model, question and text. |
 | `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
 | `model` | `jev-latest` | passed straight through. |
-| `url` | the Jev endpoint | point it at a gateway or a mock. |
+| `url` | the Jev endpoint | point it at a gateway or a mock. Plain `http` is refused unless the host is this machine, because a bearer token over plaintext is a key read by anything on the path, and that happens through a typo rather than a decision. `allow_insecure_http=True` if you meant it. |
 | `verify` | the machine's trust store | a CA file or an `ssl.SSLContext`, for a gateway signed by a private CA. Never a boolean: switching verification off is something you should have to write out yourself. |
 | `guidance` | `repeat` | `once` carries the question in the state instead of in every item's question. Large saving on short items, almost none on long ones, and it changes the prompt. See below. |
 
@@ -849,7 +849,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 134 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 139 tests, a local server, no key and no network needed
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python demo.py                                      # the two arms racing, 30s, no key

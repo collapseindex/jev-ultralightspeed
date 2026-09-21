@@ -21,21 +21,46 @@ twice as fast. Either way, bring your own key.
     answers = classify(messages, "Does this need a human today?")
 """
 
-from . import _http2, _ledger                                       # noqa: F401
-# Re-exported so the package is the one place anything is imported from.
-from ._answers import Answer, Ask, Usage, _Ask, _copy_answer, _read, triage    # noqa: F401
-from ._client import Client, classify, judge    # noqa: F401
-from ._errors import JevError    # noqa: F401
-from ._limits import _Limiter    # noqa: F401
-from ._protocol import (GUIDANCE, _clean, _guidance_text, _one_body, _packed_body,
-                        _question, _same_question)    # noqa: F401
-from ._settings import (CHARS_PER_TOKEN, DRAIN_S, MAX_FAILURES_KEPT, MAX_ITEM_CHARS,
-                        MAX_LATENCIES, MAX_REQUEST_TOKENS, MAX_RETRIES, MAX_STATE_TOKENS,
-                        MIN_SKIP_BUDGET, MODEL, PACK, REQUESTS_PER_MINUTE, RETRY_STATUSES,
-                        SKIP_FRACTION, SSL_CONTEXT, TIMEOUT_S, URL, WARM_TIMEOUT_S,
-                        WINDOW_PER_WORKER, WORKERS)    # noqa: F401
+from . import _http2, _ledger  # noqa: F401
 
-__version__ = "0.16.1"
+# Re-exported so the package is the one place anything is imported from.
+from ._answers import Answer, Ask, Usage, _Ask, _copy_answer, _read, triage  # noqa: F401
+from ._client import Client, classify, judge  # noqa: F401
+from ._errors import JevError  # noqa: F401
+from ._limits import _Limiter  # noqa: F401
+from ._protocol import (
+                        GUIDANCE,
+                        _clean,
+                        _guidance_text,
+                        _one_body,
+                        _packed_body,
+                        _question,  # noqa: F401
+                        _same_question,
+)
+from ._settings import (
+                        CHARS_PER_TOKEN,
+                        DRAIN_S,
+                        MAX_FAILURES_KEPT,
+                        MAX_ITEM_CHARS,
+                        MAX_LATENCIES,
+                        MAX_REQUEST_TOKENS,
+                        MAX_RETRIES,
+                        MAX_STATE_TOKENS,
+                        MIN_SKIP_BUDGET,
+                        MODEL,
+                        PACK,
+                        REQUESTS_PER_MINUTE,
+                        RETRY_STATUSES,
+                        SKIP_FRACTION,
+                        SSL_CONTEXT,
+                        TIMEOUT_S,
+                        URL,
+                        WARM_TIMEOUT_S,
+                        WINDOW_PER_WORKER,  # noqa: F401
+                        WORKERS,
+)
+
+__version__ = "0.17.0"
 
 __all__ = ["Answer", "Ask", "Client", "JevError", "Usage", "classify", "judge",
            "triage"]

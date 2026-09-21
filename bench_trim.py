@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client  # noqa: E402
 
 ITEMS = Path(os.environ.get("XSTEST_ITEMS", "../dinostomp/audits/xstest-refusal/items.jsonl"))
 OUT = Path("data/results")
@@ -168,7 +168,7 @@ def analyse(path: Path) -> None:
         per_item = info.get("usd", 0.0) / max(1, len(records))
         fits = int(STATE_TOKEN_BUDGET * CHARS_PER_TOKEN / max(1, info.get("mean_chars", 1)))
         rows.append((info.get("mean_chars", 0), name, info, records, kept, got, per_item, fits))
-    for chars, name, info, records, kept, got, per_item, fits in sorted(rows, reverse=True):
+    for chars, name, info, records, kept, _got, per_item, fits in sorted(rows, reverse=True):
         cost = per_item * 1000 / kept if kept else float("inf")
         print(f"{name:<13}{chars:>7.0f}{info.get('tokens_per_item', 0):>10.1f}"
               f"{item_accuracy(records):>11.1%}{kept:>12.0%}{cost:>18.3f}{fits:>16}")

@@ -23,7 +23,7 @@ import random
 import ssl
 import threading
 import time
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from ._errors import JevError
 
@@ -38,7 +38,7 @@ def available() -> bool:
     if httpx is None:
         return False
     try:
-        import h2                            # noqa: F401
+        import h2  # noqa: F401
     except ImportError:                      # pragma: no cover - depends on install
         return False
     return True
@@ -221,7 +221,8 @@ class Pipe:
                         if on_request:
                             on_request(data)
                         return data
-                    if answer.status_code not in self.retry_statuses or attempt == self.max_retries - 1:
+                    last_try = attempt == self.max_retries - 1
+                    if answer.status_code not in self.retry_statuses or last_try:
                         raise JevError(f"Jev answered {answer.status_code}: {answer.text[:300]}")
                     wait = _backoff(attempt, answer.headers.get("retry-after"))
                     pushed = answer.status_code

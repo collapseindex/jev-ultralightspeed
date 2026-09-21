@@ -77,7 +77,7 @@ def a_million(rate: float) -> str:
 
 
 def draw(elapsed: float, counts: dict[str, float], target: int, note: str) -> None:
-    width = min(shutil.get_terminal_size((100, 30)).columns, 100)
+    min(shutil.get_terminal_size((100, 30)).columns, 100)
     out = [f"{WHITE}{target:,} judgements, one ceiling of {CEILING} requests a minute{OFF}", ""]
     speed = counts[PACKED] / max(elapsed, 0.1)
     # The trail streams out behind him, which is the left, and it grows with the
@@ -127,7 +127,7 @@ def replay(target: int, speed: float) -> None:
 
 def live(target: int) -> None:
     """Both arms against the real API, sharing one ceiling."""
-    from jev_ultralightspeed import Client, REQUESTS_PER_MINUTE, _Limiter
+    from jev_ultralightspeed import REQUESTS_PER_MINUTE, Client, _Limiter
 
     rows = [f"ticket {n}: the checkout is failing and orders are being lost" for n in range(target)]
     question = "Does this need a human today?"

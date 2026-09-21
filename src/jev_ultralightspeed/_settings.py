@@ -40,6 +40,6 @@ MIN_SKIP_BUDGET = 5                    # requests' worth, so a small call is not
 MAX_FAILURES_KEPT = 1_000              # reported in full; the rest are counted only
 _CLIENT_ARGUMENTS = ("key", "url", "model", "pack", "workers", "requests_per_minute",
                      "cache", "dedupe", "transport", "verify", "guidance", "paced",
-                     "limiter", "chars_per_token")
+                     "limiter", "chars_per_token", "allow_insecure_http")
 WINDOW_PER_WORKER = 2                  # requests queued per worker, so a straggler is not a wall
-DRAIN_S = 5.0                          # how long an abandoned run waits for what is still in the air
+DRAIN_S = 5.0                          # an abandoned run waits this long for what is in the air

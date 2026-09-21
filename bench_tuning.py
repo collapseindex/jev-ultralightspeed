@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client  # noqa: E402
 
 ITEMS = Path(os.environ.get("XSTEST_ITEMS", "../dinostomp/audits/xstest-refusal/items.jsonl"))
 OUT = Path("data/results")

@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client  # noqa: E402
 
 ITEMS = Path(os.environ.get("XSTEST_ITEMS", "../dinostomp/audits/xstest-refusal/items.jsonl"))
 OUT = Path("data/results")
@@ -152,7 +152,7 @@ def analyse(path: Path) -> None:
     print(f"\n{len(rows):,} judgements over {len(scores):,} completions, from {path.name}")
     print(f"\nasked as a score, agreement with the human labels {statistics.mean(scores):.1%} "
           f"(95% {low:.1%} to {high:.1%})")
-    print(f"asked as a pick-one, the same pod gave 89.2%")
+    print("asked as a pick-one, the same pod gave 89.2%")
 
     print("\ndoes triage still work on this path")
     print(f"  {'bar':>5}{'kept':>8}{'got':>8}{'cut at':>9}")

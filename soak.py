@@ -22,7 +22,7 @@ from collections import Counter
 
 sys.path.insert(0, "src")
 
-from jev_ultralightspeed import Client                                   # noqa: E402
+from jev_ultralightspeed import Client  # noqa: E402
 
 QUESTION = "Does this message need a human to act on it today?"
 CRITERIA = {

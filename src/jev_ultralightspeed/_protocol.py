@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 from ._answers import _Ask
 from ._errors import JevError
@@ -45,13 +45,13 @@ def _guidance_text(instructions: str, criteria: dict | None, options: dict | Non
     return "\n".join(lines)
 
 
-def _one_body(model, ask: "_Ask") -> dict:
+def _one_body(model, ask: _Ask) -> dict:
     return {"model": model, "state": {"item_1": ask.text},
             "questions": {"item_1": _question(ask.instructions, ask.criteria, ask.options,
                                               ask.levels)}}
 
 
-def _same_question(asks: Sequence["_Ask"]) -> bool:
+def _same_question(asks: Sequence[_Ask]) -> bool:
     """
     Whether every ask in a pack is asking the same thing.
 
@@ -66,7 +66,7 @@ def _same_question(asks: Sequence["_Ask"]) -> bool:
                and ask.levels is first.levels for ask in asks[1:])
 
 
-def _packed_body(model, asks: Sequence["_Ask"], guidance: str = "repeat") -> dict:
+def _packed_body(model, asks: Sequence[_Ask], guidance: str = "repeat") -> dict:
     """
     Several items in one state, one question each, every question naming the
     item it is about.

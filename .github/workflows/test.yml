@@ -29,6 +29,18 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest tests -q
 
+  lint:
+    # Catches a different class from pytest: dead imports, a zip that would
+    # silently truncate, syntax a newer Python does better.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
   fast:
     # The HTTP/2 path is the one the numbers were measured on, so it gets its
     # own job with the extra actually installed.

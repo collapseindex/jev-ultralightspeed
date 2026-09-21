@@ -16,8 +16,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from jev_ultralightspeed import (Answer, Client, JevError, _Limiter,          # noqa: E402
-                                 _packed_body, _read, classify)
+from jev_ultralightspeed import (  # noqa: E402
+    Answer,
+    Client,
+    JevError,
+    _Limiter,
+    _packed_body,
+    _read,
+    classify,
+)
 
 QUESTION = "Does this need a human today?"
 
@@ -289,6 +296,7 @@ def test_a_retry_after_date_is_read_as_well_as_a_count():
     """RFC 9110 allows either form. Only the count used to be understood."""
     import email.utils
     import time as clock
+
     from jev_ultralightspeed import _http2
 
     soon = email.utils.formatdate(clock.time() + 30, usegmt=True)
@@ -301,8 +309,9 @@ def test_a_retry_after_date_is_read_as_well_as_a_count():
 
 
 def test_the_permit_is_taken_where_the_request_is_sent():
-    from jev_ultralightspeed import _http2
     import inspect
+
+    from jev_ultralightspeed import _http2
 
     source = inspect.getsource(_http2.Pipe._one)
     # The permit goes inside the slot, immediately before the send, so what the
@@ -426,9 +435,9 @@ class Counting:
     """A server that refuses everything and counts what it was asked."""
 
     def __init__(self, status=401):
-        from http.server import BaseHTTPRequestHandler, HTTPServer
         import json as _json
         import threading as _threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
 
         self.seen = 0
         counter = self
@@ -489,9 +498,9 @@ class Answering:
         # Threading, and it has to be: keep-alive on a single-threaded server
         # serializes the workers, so the concurrency under test disappears and
         # the run deadlocks instead of failing.
-        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import json as _json
         import threading as _threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         self.seen = 0
         self.warmed = 0
@@ -1080,6 +1089,7 @@ def test_every_place_that_states_a_version_agrees():
     touched pyproject and __init__ and nothing checked the fourth place.
     """
     import re
+
     import jev_ultralightspeed
 
     root = Path(__file__).resolve().parents[1]
@@ -1902,3 +1912,40 @@ def test_the_token_estimate_can_be_told_about_denser_text():
     biggest_roomy = max(len(body["state"]) for body in roomy.sent)
     assert biggest_dense < biggest_roomy, (biggest_dense, biggest_roomy)
     assert dense.chars_per_token == 1.0
+
+
+# -- the key does not go out in the clear -----------------------------------
+
+def test_plain_http_to_another_machine_is_refused():
+    """
+    A bearer token over plain http is a key read by anything on the path, and the
+    way that happens is a typo in a hostname rather than a decision.
+    """
+    for url in ("http://example.internal/v1", "http://10.0.0.5/v1", "http://a-typo.com/v1"):
+        with pytest.raises(JevError, match="in the clear"):
+            Client(key="sk-secret", url=url, transport="threads")
+
+
+def test_the_refusal_does_not_repeat_the_key_back():
+    try:
+        Client(key="sk-a-real-looking-secret", url="http://a-typo.com/v1", transport="threads")
+    except JevError as error:
+        assert "sk-a-real-looking-secret" not in str(error)
+    else:
+        raise AssertionError("it was not refused")
+
+
+def test_plain_http_to_this_machine_is_fine():
+    """Loopback is a test double or a local gateway, which is what http is for."""
+    for url in ("http://127.0.0.1:8080/v1", "http://localhost/v1", "http://[::1]/v1"):
+        Client(key="k", url=url, transport="threads").close()
+
+
+def test_a_plaintext_gateway_can_be_opted_into():
+    client = Client(key="k", url="http://gateway.internal/v1", transport="threads",
+                    allow_insecure_http=True)
+    client.close()
+
+
+def test_https_anywhere_is_fine():
+    Client(key="k", url="https://anything.example/v1", transport="threads").close()

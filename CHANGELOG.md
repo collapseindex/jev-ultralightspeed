@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.17.0 (2026-09-20)
+
+### Fixed
+- **A key could go out in the clear.** `Client(url="http://...")` accepted any host and sent the
+  bearer token over plaintext, so `http://a-typo.com/v1` quietly handed a stranger the key.
+  Reproduced against a local server that printed the header it received. Plain `http` is now refused
+  unless the host is this machine, which is what a test double or a local gateway is, and the refusal
+  does not repeat the key back. `allow_insecure_http=True` for a plaintext gateway you meant.
+- Two `zip()` calls in `_client.py` walked a group against its answers without `strict=`. If those
+  ever differed in length the quiet outcome is dropped answers, which is the worst way to be wrong.
+
+### Added
+- **Ruff in CI**, which catches a different class from pytest. It found 86 things: 23 dead imports,
+  20 unsorted import blocks, 14 of those unguarded `zip()` calls, and assorted long lines and dated
+  syntax. The package lints clean, and every analysis path was re-run against the committed data
+  afterwards to confirm the numbers did not move.
+
+134 tests plus 5 for the http guard, four Pythons, three operating systems, and a linter.
+
 ## v0.16.1 (2026-09-20)
 
 No behaviour change. The structural work two reviews asked for, done while the suite watched.
