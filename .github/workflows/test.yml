@@ -28,6 +28,21 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install pytest
       - run: python -m pytest tests -q
+        env:
+          # The volume tests run at full size in their own job, once.
+          JEV_PROPERTY_ITEMS: "2000"
+
+  properties:
+    # Ten thousand items through a server that refuses, stalls, drops the
+    # connection and answers nonsense, three seeds, both transports.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest ".[dev]"
+      - run: python -m pytest tests/test_properties.py -q
 
   lint:
     # Catches a different class from pytest: dead imports, a zip that would

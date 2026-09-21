@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.17.0** · Apache-2.0 · no required dependencies
+**v0.17.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -849,7 +849,8 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 139 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 149 tests, a local server, no key and no network needed
+JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
 python demo.py                                      # the two arms racing, 30s, no key

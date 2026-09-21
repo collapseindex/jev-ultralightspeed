@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.17.1 (2026-09-20)
+
+No library change. The thing a review said to attack next: packing, caching, checkpoints and failure
+all at once, at volume, against a server having a bad day.
+
+### Added
+- **`tests/test_properties.py`**: ten thousand items per seed, a randomised client (pack 8/32/64,
+  4 or 8 workers, either transport, cache and dedupe on or off), and a server that pushes back with
+  `429`, goes away with `503`, drops the connection mid-request, answers one item short and answers
+  nonsense, at rates a seed decides. Then it checks the promises that do not depend on any of it:
+
+      every item gets exactly one answer, in the order it was given
+      a repeat of a text gets the same answer as its original
+      a rerun with the same checkpoint asks only for what was skipped
+      the checkpoint holds one key per distinct answer and none for a skipped item
+      what usage says adds up to what came back
+
+  Each behaviour already had a test. None of them had been run together at volume, which is where
+  what is left would be. The matrix jobs run it at 2,000 items and a job of its own runs the full
+  10,000; `JEV_PROPERTY_ITEMS` takes it higher.
+
+### What it found
+Nothing in the library, which is the answer I wanted and not the one I expected. It did find two
+things in the test itself, both of which are the library behaving as documented:
+
+- A hostile server at 12% trouble pushes unreadable answers past the 1% that `on_error="skip"`
+  tolerates, so the run abandons. Correct, and the reason the harness now has two dials: trouble a
+  retry fixes can be common, trouble it cannot has to be rare.
+- A resume found nothing because the second client was randomised too, and `pack` is part of the key
+  on purpose. The test rediscovered v0.16.0 by accident.
+
+149 tests, four Pythons, three operating systems, a linter, and a volume job.
+
 ## v0.17.0 (2026-09-20)
 
 ### Fixed
