@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.16.0** · Apache-2.0 · no required dependencies
+**v0.16.1** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 

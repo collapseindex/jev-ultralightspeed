@@ -25,6 +25,8 @@ import threading
 import time
 from typing import Callable, Sequence
 
+from ._errors import JevError
+
 try:                                        # optional, and checked before use
     import httpx
 except ImportError:                          # pragma: no cover - depends on install
@@ -90,8 +92,6 @@ def _backoff(attempt: int, retry_after: str | None) -> float:
     hint = _retry_after_seconds(retry_after)
     if hint is not None:
         if hint > MAX_HINT_S:
-            from . import JevError
-
             raise JevError(f"the server asked for {hint:.0f}s before retrying, which is longer "
                            f"than the {MAX_HINT_S:.0f}s this client will wait. Try again later.")
         return hint + random.random() * HINT_JITTER_S
@@ -163,8 +163,6 @@ class Pipe:
         wait happens in slices, so a run that has been abandoned stops waiting
         instead of draining its whole queue of permits first.
         """
-        from . import JevError                   # here, to keep the import one-way
-
         while True:
             if run is not None and run.broken:
                 raise JevError(run.broken)
@@ -198,8 +196,6 @@ class Pipe:
         slots while doing nothing, which is throughput thrown away exactly
         when there is least of it to spare.
         """
-        from . import JevError
-
         for attempt in range(self.max_retries):
             if run.broken:
                 raise JevError(run.broken)          # abandoned before this one even waited

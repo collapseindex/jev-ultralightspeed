@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.16.1 (2026-09-20)
+
+No behaviour change. The structural work two reviews asked for, done while the suite watched.
+
+### Changed
+- **`__init__.py` was 58KB holding everything.** It is 2KB of re-exports now, and the parts have
+  names:
+
+  | | |
+  | --- | ---: |
+  | `_client.py` | 39KB |
+  | `_answers.py` | 11KB |
+  | `_http2.py` | 15KB |
+  | `_ledger.py` | 8KB |
+  | `_protocol.py` | 4.6KB |
+  | `_settings.py` | 2.5KB |
+  | `_limits.py` | 2.2KB |
+  | `_errors.py` | 147 bytes |
+
+  Nothing was retyped: the split moved exact line ranges, so a diff shows moves rather than
+  rewrites. Every name the tests and benchmarks import still resolves from the package root, which
+  is the compatibility contract.
+- **`_http2` no longer reaches back into the package.** It imported `JevError` from `.` inside three
+  functions to dodge a circular import. `JevError` has a module of its own now, so that import is a
+  normal one at the top of the file.
+- Three imports in `_client.py` that the split showed were never used, and `noqa` on the re-exports
+  so a linter reads them as deliberate.
+
+### Added
+- **CI runs on macOS and Windows**, not Ubuntu alone, because checkpoint files, TLS trust, threads
+  against an event loop and the shutdown path are all places an operating system has opinions.
+
+### Fixed
+- Windows CI found a test that asserted a paced wait is at most exactly the interval. Where the clock
+  is coarse enough that two reads land on the same instant, the answer is `(now + 0.1) - now`, which
+  in floating point is `0.10000000000002274` for a `now` the size of an uptime. The library was fine;
+  the assertion was too tight by 23 femtoseconds.
+
+134 tests, no key and no network needed, on four Pythons and three operating systems.
+
 ## v0.16.0 (2026-09-20)
 
 A review found that `_shape` puts `self.pack` in the cache key and called it a possible correctness
