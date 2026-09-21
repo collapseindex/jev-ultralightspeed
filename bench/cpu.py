@@ -7,12 +7,17 @@ unlike Usage.seconds. Compare the same command and Python on two revisions.
 import hashlib
 import random
 import statistics
+import sys
 import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
 
-from jev_ultralightspeed import Client
+# Anchored to the file, not to where you happen to be standing.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from jev_ultralightspeed import Client  # noqa: E402
 
 
 class Local(Client):

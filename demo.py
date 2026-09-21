@@ -22,8 +22,11 @@ import shutil
 import sys
 import threading
 import time
+from pathlib import Path
 
-sys.path.insert(0, "src")
+# Anchored to the file, not to where you happen to be standing.
+ROOT = Path(__file__).resolve().parents[0]
+sys.path.insert(0, str(ROOT / "src"))
 
 CEILING = 1_000                  # requests a minute, the client's default
 PACK = 32

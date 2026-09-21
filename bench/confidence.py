@@ -35,12 +35,15 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-sys.path.insert(0, "src")
+# Anchored to the file, not to where you happen to be standing.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 import corpora  # noqa: E402
+
 from jev_ultralightspeed import Client  # noqa: E402
 
-OUT = Path("data/results")
+OUT = ROOT / "data" / "results"
 PACK = 32
 COPIES = 6
 SEED = 7

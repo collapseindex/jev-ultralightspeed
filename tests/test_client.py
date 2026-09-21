@@ -486,6 +486,156 @@ def test_a_doomed_run_is_abandoned_rather_than_sent_in_full(transport):
     assert server.seen <= 24, f"{server.seen} of 200 requests went out after the run was doomed"
 
 
+class Garbling:
+    """A server that answers 200 with something that is not JSON, `bad` times."""
+
+    def __init__(self, bad=10_000):
+        import json as _json
+        import threading as _threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.seen = 0
+        counter = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                asked = _json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
+                counter.seen += 1
+                if counter.seen <= bad:
+                    # What a proxy, a captive portal or a gateway puts in front of
+                    # you: status 200, content-type says JSON, body says otherwise.
+                    body = b"<html><body>502 Bad Gateway</body></html>"
+                else:
+                    body = _json.dumps({
+                        "model": "jev-1.13.0",
+                        "answers": {name: {"type": "noul", "noul": 0.9}
+                                    for name in asked["state"]},
+                        "usage": {"input_tokens": 10, "output_tokens": 1}}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1/systemone"
+        _threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+@both_transports
+def test_a_200_that_is_not_json_comes_out_as_a_jev_error(transport, monkeypatch):
+    """
+    It used to come out as a JSONDecodeError, which is a ValueError, which
+    `on_error="skip"` does not catch and no caller is told to expect. A gateway
+    answering 200 with an HTML error page is an ordinary production event and it
+    walked straight past every net in the library.
+    """
+    from jev_ultralightspeed import _client, _http2
+
+    if transport == "http2" and not _http2.available():
+        pytest.skip("httpx not installed")
+    # Every attempt fails here, so the full backoff would be spent proving
+    # something two attempts already prove.
+    monkeypatch.setattr(_client, "MAX_RETRIES", 2)
+    server = Garbling()
+    client = Client(key="k", url=server.url, pack=4, workers=2, transport=transport)
+    try:
+        with pytest.raises(JevError, match="not JSON"):
+            client.classify([f"item {n}" for n in range(8)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+
+
+@both_transports
+def test_a_200_that_is_not_json_is_retried_like_a_dropped_connection(transport):
+    """
+    Same class of event as a connection that went away, so it gets the same
+    treatment: drop it, come back, and count the attempt under the status that
+    means nothing came back at all.
+    """
+    from jev_ultralightspeed import _http2
+
+    if transport == "http2" and not _http2.available():
+        pytest.skip("httpx not installed")
+    server = Garbling(bad=1)                 # the first request only
+    client = Client(key="k", url=server.url, pack=4, workers=1, transport=transport)
+    try:
+        answers = client.classify([f"item {n}" for n in range(8)], QUESTION)
+    finally:
+        client.close()
+        server.close()
+    assert len(answers) == 8 and all(answer.ok for answer in answers)
+    assert client.usage.retries >= 1, "the garbled answer should have been retried"
+    assert client.usage.pushback.get(0), "and counted as one that never came back"
+
+
+def test_close_shuts_the_connections_the_workers_opened():
+    """
+    A connection belongs to the thread that opened it and `close()` runs on the
+    caller's, so the workers' sockets used to be left for the garbage collector
+    to notice, which is the one thing `close()` exists to make unnecessary.
+    """
+    server = Answering()
+    client = Client(key="k", url=server.url, pack=1, workers=6, transport="threads")
+    try:
+        client.classify([f"item {n}" for n in range(60)], QUESTION)
+        opened = list(client._connections)
+        assert len(opened) > 1, "this needs more than the calling thread's own connection"
+        sockets = [connection.sock for connection in opened]
+        client.close()
+        assert not client._connections
+        assert all(sock is None or sock.fileno() == -1 for sock in sockets), \
+            "a worker's socket was left open"
+    finally:
+        client.close()
+        server.close()
+
+
+@both_transports
+def test_breaking_out_of_a_stream_stops_the_job(transport):
+    """
+    Breaking out of the loop raises GeneratorExit at the yield, which is not a
+    JevError, so it used to walk past the handler that clears the queue and tells
+    the run to stop and land in `finally`, which flushes but stops nothing.
+
+    The queue was never submitted either way, so the bill was bounded before this
+    and is smaller now: measured on this server, 12 requests became 7 on threads
+    and 9 became 6 on the fast path. What this guards is the shape of it. Reading
+    one answer out of four hundred items must not cost four hundred requests.
+    """
+    import time as _time
+
+    from jev_ultralightspeed import _http2
+
+    if transport == "http2" and not _http2.available():
+        pytest.skip("httpx not installed")
+    server = Answering(delay=0.05)
+    client = Client(key="k", url=server.url, pack=1, workers=4, transport=transport)
+    try:
+        read = 0
+        for _answer in client.stream([f"item {n}" for n in range(400)], QUESTION, chunk=400):
+            read += 1
+            if read == 1:
+                break
+        _time.sleep(1.0)                     # long enough for a drained queue to show
+        assert server.seen < 40, \
+            f"{server.seen} of 400 requests went out for one answer that was read"
+        assert client.last_partial, "what did land should still be reachable"
+    finally:
+        client.close()
+        server.close()
+
+
 class Answering:
     """
     A real server on loopback that answers properly, slowly, and can be told to
@@ -1731,6 +1881,53 @@ def test_the_same_row_asked_two_things_is_two_answers():
     asked = sum(len(body["state"]) for body in client.sent)
     assert asked == 2, f"{asked} rows sent; the repeat of the first question should collapse"
     assert client.usage.cached == 1
+
+
+def test_judge_keeps_every_row_its_own_question_when_asks_is_a_generator():
+    """
+    The questions are memoised on the identity of the caller's own objects, so
+    something has to keep those objects alive. `asks` is an Iterable and a
+    generator is the obvious way to feed a million rows. Without a reference each
+    Ask was freed as soon as the loop body ended, CPython handed the same address
+    to a later row's dict, the memo hit, and that row went out carrying an
+    earlier row's question. Five rows in eight, no error, nothing in usage.
+
+    Checked on the wire rather than on the objects, and over two thousand rows
+    rather than eight, because the bug needs an address to come back around and a
+    short run can miss it.
+    """
+    from jev_ultralightspeed import Ask
+
+    client = Fake(pack=64)
+    client.judge(Ask(f"text-{index}", instructions="Which?",
+                     criteria={"tag": f"CRIT-{index}"}) for index in range(2_000))
+    wrong = []
+    for body in client.sent:
+        for name, text in body["state"].items():
+            tag = body["questions"][name]["criteria"]["tag"]
+            if tag != f"CRIT-{text.split('-')[1]}":
+                wrong.append((text, tag))
+    assert not wrong, f"{len(wrong)} of 2,000 rows went out under another row's question"
+
+
+def test_judge_still_shares_one_copy_of_a_question_across_the_rows_that_gave_it():
+    """
+    The memo is there for a reason and keeping the Asks alive must not cost it.
+
+    `_same_question` compares criteria by identity, so a pack counts as asking
+    one thing only when its rows literally share the object. Copy per row instead
+    of once for the lot and nothing hoists, which is observable: with
+    guidance="once" a uniform pack carries the question in the state, and a pack
+    the engine thinks is mixed does not.
+    """
+    from jev_ultralightspeed import GUIDANCE, Ask
+
+    client = Fake(pack=8, guidance="once")
+    shared = {"tag": "the same for all of them"}
+    client.judge([Ask(f"text-{index}", instructions="Which?", criteria=shared)
+                  for index in range(8)])
+    assert GUIDANCE in client.sent[0]["state"], \
+        "the rows gave one question and the pack should have hoisted it"
 
 
 def test_judge_says_so_when_handed_plain_text():

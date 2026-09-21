@@ -4,13 +4,19 @@ import hashlib
 import json
 import random
 import statistics
+import sys
 import threading
 import time
 from collections import deque
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
-from jev_ultralightspeed import Client
+# Anchored to the file, not to where you happen to be standing.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from jev_ultralightspeed import Client  # noqa: E402
 
 
 def measure_throttle(size, rounds, seed, transport):

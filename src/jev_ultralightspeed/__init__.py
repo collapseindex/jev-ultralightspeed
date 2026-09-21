@@ -61,7 +61,7 @@ from ._settings import (
                         WORKERS,
 )
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
 
 __all__ = ["Answer", "Ask", "Calibration", "Client", "JevError", "Usage",
            "calibrate", "classify", "judge", "triage"]

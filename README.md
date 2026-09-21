@@ -1,6 +1,6 @@
 # jev-ultralightspeed
 
-**v0.19.0** · Apache-2.0 · no required dependencies
+**v0.20.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -23,6 +23,14 @@ against human labels, with a script in this repository.
 
 **A million judgements: half an hour and $4.99. One request per item: seventeen hours and $14.97.**
 Same ceiling, same model, same question. The time is the part you feel.
+
+**The 32x is a bet on how you are charged, and that is worth saying out loud.** It holds because the
+ceiling counts requests. The day it counts tokens instead, the 32 evaporates and the 41% is what is
+left. The result that does not depend on the rate card is
+[`guidance="once"`](#carrying-the-question-once), which stops repeating the question under every item
+and took a live 32-item request from **4,598 billed tokens to 1,777**. It is off by default because
+it costs about 0.2 points of agreement, so it is yours to turn on, but it is the saving that survives
+the pricing being rewritten.
 
 ```bash
 python demo.py                 # both arms, no key needed
@@ -124,7 +132,7 @@ pip install "jev-ultralightspeed[fast]"
 git clone https://github.com/collapseindex/jev-ultralightspeed.git
 git clone https://github.com/collapseindex/dinostomp.git
 cd jev-ultralightspeed
-TYPESAFE_API_KEY=... python bench_eval.py            # about 35 minutes, about $1.20
+TYPESAFE_API_KEY=... python bench/eval.py            # about 35 minutes, about $1.20
 ```
 
 ### Why the baseline is slow, and why that is the point
@@ -145,7 +153,7 @@ changelog, and the honest comparison is the one above.
 
 ### Where an item sits in the request
 
-An aggregate hides a position effect that cancels out, so `bench_packing.py` asks directly. 10,776
+An aggregate hides a position effect that cancels out, so `bench/packing.py` asks directly. 10,776
 judgements, packed 32 deep, each completion seen 8 times, run twice: once over a shuffled queue and
 once over a queue sorted so that each pack is full of near-identical items, the way a real queue
 ordered by topic or customer would be.
@@ -175,7 +183,7 @@ can check this on your own data.
 **The intervals are clustered, not binomial.** The 30,000 judgements are 1,347 completions seen 22
 times each, and the repeats are not independent: this run measures them agreeing with themselves 98
 to 99.6% of the time. Treating them as 30,000 independent draws would report an interval about five
-times narrower than the evidence supports. `bench_eval.py` computes each completion's own accuracy
+times narrower than the evidence supports. `bench/eval.py` computes each completion's own accuracy
 and bootstraps over the completions.
 
 **The 245 retries were an artifact of going second, and they are gone.** The first version of this
@@ -236,7 +244,7 @@ throughput, not the median, which is why the mean is the column to read. An earl
 section quoted a rate derived from the median and was optimistic by about a fifth, as well as
 circular, since in a burst the measured rate is the latency bound. Raise `workers` if you raise
 `requests_per_minute`, or if you see the request rate falling short. Otherwise leave it.
-`bench_workers.py` reruns this for about ten cents.
+`bench/workers.py` reruns this for about ten cents.
 
 #### The burst, held for ten minutes
 
@@ -266,8 +274,8 @@ behind packing. And over 13,000 requests against the live service there were no 
 dropped connections, each retried and recovered.
 
 ```bash
-TYPESAFE_API_KEY=... python bench_sustained.py --minutes 10 --budget 2.50
-python bench_sustained.py --analyse data/results/<file>
+TYPESAFE_API_KEY=... python bench/sustained.py --minutes 10 --budget 2.50
+python bench/sustained.py --analyse data/results/<file>
 ```
 
 It stops at the clock or the budget, whichever comes first, and the budget is enforced by the
@@ -307,7 +315,7 @@ item by item across runs.
 
 Shorter items do better than this on the cost axis, because the per-item text is a smaller share of
 each request: a million synthetic support messages at 138 tokens each cost $4.99 for the lot, about
-a third of what one request per item would spend. `soak.py --items 1000000` runs it.
+a third of what one request per item would spend. `bench/soak.py --items 1000000` runs it.
 
 That run's *throughput* figures are not quoted here on purpose. They were measured before the rate
 limit reached the fast path, at about 2,136 requests a minute, which no client honouring the
@@ -402,7 +410,7 @@ it is not: `p` is the probability of **yes**, so 0.01 is a confident no. Rank by
 | `dedupe` | True | identical text in one call is asked once. Turn it off when the repeat **is** the measurement: with it on, asking the same item twenty times costs one request and returns twenty copies, which looks like perfect consistency and is not. |
 | `model` | `jev-latest` | passed straight through. |
 | `url` | the Jev endpoint | point it at a gateway or a mock. Plain `http` is refused unless the host is this machine, because a bearer token over plaintext is a key read by anything on the path, and that happens through a typo rather than a decision. `allow_insecure_http=True` if you meant it. |
-| `verify` | the machine's trust store | a CA file or an `ssl.SSLContext`, for a gateway signed by a private CA. Never a boolean: switching verification off is something you should have to write out yourself. |
+| `verify` | the machine's trust store | a CA file or an `ssl.SSLContext`, for a gateway signed by a private CA. Never a boolean: switching verification off is something you should have to write out yourself. A context you pass is modified on the fast path, because ALPN has to advertise h2 on the context itself or the connection quietly comes up as HTTP/1.1 and a context cannot be copied. |
 | `guidance` | `repeat` | `once` carries the question in the state instead of in every item's question. Large saving on short items, almost none on long ones, and it changes the prompt. See below. |
 
 `client.http_version` says what the connection actually negotiated, `"HTTP/2"` or `"HTTP/1.1"`, after
@@ -490,7 +498,7 @@ and is measured on [three corpora](#does-it-hold-anywhere-but-xstest); the rest 
 figures here are still XSTest.
 
 ```bash
-TYPESAFE_API_KEY=... python bench_score.py      # the table above, about seven cents
+TYPESAFE_API_KEY=... python bench/score.py      # the table above, about seven cents
 ```
 
 ### When every row asks something different
@@ -532,7 +540,7 @@ Once the question stopped being repeated per item, nearly everything left in the
 is also what caps the pack, since a request is limited by what fits in the state, and depth is what
 one unit of the rate limit buys. So a shorter item is cheaper twice over.
 
-`bench_trim.py` cuts the pod's completions to several lengths, both ends, 2,694 judgements an arm,
+`bench/trim.py` cuts the pod's completions to several lengths, both ends, 2,694 judgements an arm,
 thresholds chosen on one half of the completions and measured on the other:
 
 | kept | mean chars | tokens/item | agreement | kept at 97% | $ per 1k trusted | pack that would fit |
@@ -574,8 +582,8 @@ reached the 97% bar, so coverage came back as zero: trust none of this. That is 
 from the one `triage` was measured on, and it held.
 
 ```bash
-TYPESAFE_API_KEY=... python bench_trim.py        # six arms, ~15 cents
-python bench_trim.py --analyse data/results/<file>
+TYPESAFE_API_KEY=... python bench/trim.py        # six arms, ~15 cents
+python bench/trim.py --analyse data/results/<file>
 ```
 
 ### What to set
@@ -586,7 +594,7 @@ bar**:
 
     trusted items a second = items a second x the share you can keep at the target
 
-`bench_tuning.py` prices eight shapes that way over 21,552 judgements on the `xstest-refusal` pod,
+`bench/tuning.py` prices eight shapes that way over 21,552 judgements on the `xstest-refusal` pod,
 thresholds chosen on one half of the completions and measured on the other, arms run in a random
 order. At a 97% bar, which is the annotators' own agreement rate:
 
@@ -620,8 +628,8 @@ by 0.2 to 0.5 points, which lines up with the paired −0.20 measured separately
 unchanged. Worth it when the question is long relative to the items, not otherwise.
 
 ```bash
-TYPESAFE_API_KEY=... python bench_tuning.py        # eight shapes, ~35 cents
-python bench_tuning.py --analyse data/results/<file>
+TYPESAFE_API_KEY=... python bench/tuning.py        # eight shapes, ~35 cents
+python bench/tuning.py --analyse data/results/<file>
 ```
 
 ### Pacing, and why it is off
@@ -654,7 +662,7 @@ to zero. So the only argument left for pacing is that somebody on a stricter all
 throttle this account does not. If `usage.retries` is climbing, try it. If it is not, do not.
 
 ```bash
-python bench.py --throttle --items 256 --rounds 3    # the table above, no key needed
+python bench/sweep.py --throttle --items 256 --rounds 3    # the table above, no key needed
 ```
 
 ### Knowing which verdicts to trust
@@ -723,9 +731,9 @@ come back at a probability of 1.000, so the ranking runs out of resolution: no c
 judge is sure of nearly everything there is correspondingly little for triage to sort.
 
 ```bash
-python corpora.py --build boolq ag_news    # downloads once; the only thing here that goes out
-python bench_confidence.py --corpus boolq
-python bench_confidence.py --compare data/results/*confidence*.jsonl
+python bench/corpora.py --build boolq ag_news    # downloads once; the only thing here that goes out
+python bench/confidence.py --corpus boolq
+python bench/confidence.py --compare data/results/*confidence*.jsonl
 ```
 
 Four more things fell out of the XSTest run, and two of them are negative results worth as much as
@@ -762,8 +770,8 @@ And one reassurance: across positions in a shuffled packed request the spread is
 the position table above is the sorted-queue case, which is the one to avoid.
 
 ```bash
-TYPESAFE_API_KEY=... python bench_confidence.py     # collects for ~12 cents, then argues for free
-python bench_confidence.py --analyse data/results/<file>
+TYPESAFE_API_KEY=... python bench/confidence.py     # collects for ~12 cents, then argues for free
+python bench/confidence.py --analyse data/results/<file>
 ```
 
 `triage` ranks by `answer.certainty`, which for a yes/no question is not `p`: `p` is the probability
@@ -774,7 +782,7 @@ The run behind that table is committed, so the analysis can be re-cut or argued 
 and no spending**:
 
 ```bash
-python bench_confidence.py --analyse data/results/20260920_122545_confidence_jev-latest_1347x6_p32_s7.jsonl
+python bench/confidence.py --analyse data/results/20260920_122545_confidence_jev-latest_1347x6_p32_s7.jsonl
 ```
 
 It holds one line per judgement: which completion, the human label, whether the two annotators agreed,
@@ -862,7 +870,7 @@ individual verdicts move. That is inside the two point margin, so the honest sum
 difference worth caring about at this sample size". But the interval sits almost entirely below zero,
 which is a hint of a real effect of about a fifth of a point against the shared question, and one
 pod's short question is a smaller prompt change than a long one would be. So it is opt in, it is part
-of the cache and checkpoint key, and `bench_guidance.py` reruns the comparison for about 25 cents.
+of the cache and checkpoint key, and `bench/guidance.py` reruns the comparison for about 25 cents.
 
 ### Resuming a job that dies
 
@@ -963,7 +971,7 @@ must not be quietly skipped a million times. A test holds that line.
   and a key that depended on it would miss almost every time. What is traded away is measured rather
   than assumed: packed against one per request is **+0.01 points, 95% −0.72 to +0.75**, and no
   position effect is detectable at any depth. Every answer carries the depth it came from in
-  `answer.packed`, and `cache=False` with `dedupe=False` and no checkpoint is how `bench_packing.py`
+  `answer.packed`, and `cache=False` with `dedupe=False` and no checkpoint is how `bench/packing.py`
   controls placement when it has to.
 - **It does not hide failures.** Retries cover 429, 500, 502, 503, 504 and 529, with jitter and the
   server's own `Retry-After` when it sends one; anything else is raised with what the API said. A
@@ -982,24 +990,24 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 176 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 186 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
-TYPESAFE_API_KEY=... python bench_eval.py            # the table above, ~35 min, ~$1.20
+TYPESAFE_API_KEY=... python bench/eval.py            # the table above, ~35 min, ~$1.20
 python demo.py                                      # the two arms racing, 30s, no key
-python bench.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls
-TYPESAFE_API_KEY=... python bench_workers.py         # latency against concurrency, ~10 cents
-TYPESAFE_API_KEY=... python bench_trim.py            # how much of an item is needed, ~15 cents
-TYPESAFE_API_KEY=... python bench_score.py           # a score against human labels, ~7 cents
-TYPESAFE_API_KEY=... python bench.py --items 256     # pack and concurrency sweep, ~5 cents
-TYPESAFE_API_KEY=... python bench_packing.py         # position and sorted queues, ~$1
-TYPESAFE_API_KEY=... python bench_guidance.py        # the question once vs per item, ~25 cents
-TYPESAFE_API_KEY=... python bench_sustained.py       # is the rate a rate, 10 min, ~$1.60
-TYPESAFE_API_KEY=... python soak.py --items 100000   # sustained load, ~50 cents
+python bench/sweep.py --offline --items 8000 --rounds 9    # the client's own work, no key, no calls
+TYPESAFE_API_KEY=... python bench/workers.py         # latency against concurrency, ~10 cents
+TYPESAFE_API_KEY=... python bench/trim.py            # how much of an item is needed, ~15 cents
+TYPESAFE_API_KEY=... python bench/score.py           # a score against human labels, ~7 cents
+TYPESAFE_API_KEY=... python bench/sweep.py --items 256     # pack and concurrency sweep, ~5 cents
+TYPESAFE_API_KEY=... python bench/packing.py         # position and sorted queues, ~$1
+TYPESAFE_API_KEY=... python bench/guidance.py        # the question once vs per item, ~25 cents
+TYPESAFE_API_KEY=... python bench/sustained.py       # is the rate a rate, 10 min, ~$1.60
+TYPESAFE_API_KEY=... python bench/soak.py --items 100000   # sustained load, ~50 cents
 
-python corpora.py --build boolq ag_news              # the labelled sets, downloaded once
-TYPESAFE_API_KEY=... python bench_confidence.py --corpus boolq    # triage on one, ~15 cents
-python bench_confidence.py --compare data/results/*confidence*.jsonl   # all of them, free
+python bench/corpora.py --build boolq ag_news              # the labelled sets, downloaded once
+TYPESAFE_API_KEY=... python bench/confidence.py --corpus boolq    # triage on one, ~15 cents
+python bench/confidence.py --compare data/results/*confidence*.jsonl   # all of them, free
 ```
 
 The tests replace the one method that talks to the API, so the packing, the deduplication, the cache,

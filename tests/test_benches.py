@@ -17,9 +17,26 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 
-import bench_sustained  # noqa: E402
+import sustained as bench_sustained  # noqa: E402
+
+
+def test_every_script_the_readme_tells_you_to_run_is_there():
+    """
+    The README is the instructions, and a moved file turns them into a typo
+    nobody notices until a stranger runs one. Cheap to check, so it is checked
+    rather than remembered: the benches moved into bench/ once and there were
+    thirty-nine references to update.
+    """
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    named = sorted(set(re.findall(r"[A-Za-z0-9_./-]+\.py",
+                                  (root / "README.md").read_text(encoding="utf-8"))))
+    assert named, "no scripts named in the README at all, which is not right either"
+    missing = [name for name in named if not (root / name).exists()]
+    assert not missing, f"the README points at {missing}, which is not there"
 
 
 def readings(pairs, tokens_each=100):

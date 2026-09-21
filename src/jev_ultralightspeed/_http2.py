@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import email.utils
+import json
 import random
 import ssl
 import threading
@@ -217,15 +218,32 @@ class Pipe:
                     if on_timing:
                         on_timing((time.monotonic() - started) * 1000)
                     if answer.status_code == 200:
-                        data = answer.json()
-                        if on_request:
-                            on_request(data)
-                        return data
-                    last_try = attempt == self.max_retries - 1
-                    if answer.status_code not in self.retry_statuses or last_try:
-                        raise JevError(f"Jev answered {answer.status_code}: {answer.text[:300]}")
-                    wait = _backoff(attempt, answer.headers.get("retry-after"))
-                    pushed = answer.status_code
+                        try:
+                            data = answer.json()
+                        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                            # A 200 whose body is not JSON is an intermediary
+                            # breaking it rather than an answer: a proxy's error
+                            # page, a captive portal, a truncated response. Same
+                            # event as a dropped connection, and retried as one.
+                            # Letting it out raw meant it walked past
+                            # `on_error="skip"`, which catches JevError only.
+                            if attempt == self.max_retries - 1:
+                                raise JevError(
+                                    f"Jev answered 200 with a body that is not JSON: "
+                                    f"{answer.text[:300]!r}") from error
+                            wait = _backoff(attempt, None)
+                            pushed = 0
+                        else:
+                            if on_request:
+                                on_request(data)
+                            return data
+                    else:
+                        last_try = attempt == self.max_retries - 1
+                        if answer.status_code not in self.retry_statuses or last_try:
+                            raise JevError(f"Jev answered {answer.status_code}: "
+                                           f"{answer.text[:300]}")
+                        wait = _backoff(attempt, answer.headers.get("retry-after"))
+                        pushed = answer.status_code
                 except httpx.HTTPError as error:
                     if on_timing:
                         on_timing((time.monotonic() - started) * 1000)

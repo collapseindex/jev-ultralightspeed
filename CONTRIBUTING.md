@@ -19,8 +19,8 @@ cannot be tested that way needs a note in the pull request saying why.
 For the benchmarks you need a key and a few cents:
 
 ```bash
-TYPESAFE_API_KEY=... python bench.py --items 256 --rounds 3
-TYPESAFE_API_KEY=... python soak.py --items 10000
+TYPESAFE_API_KEY=... python bench/sweep.py --items 256 --rounds 3
+TYPESAFE_API_KEY=... python bench/soak.py --items 10000
 ```
 
 ## The rules that matter
@@ -30,7 +30,7 @@ TYPESAFE_API_KEY=... python soak.py --items 10000
 2. **Never log, print or raise the key.** Errors carry the status and the API's message. If a change
    could put a header in a traceback, it does not go in.
 3. **A performance claim needs a measurement.** Not an opinion about how HTTP works. Add a row to
-   `bench.py`, run it, and put the number in the pull request. If the number is small, say so; a
+   `bench/sweep.py`, run it, and put the number in the pull request. If the number is small, say so; a
    change that turns out not to matter is still useful to have measured.
 4. **A faster client that changes the answers is a bug.** Every benchmark reports agreement against
    a baseline for that reason. Keep it.

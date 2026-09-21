@@ -128,6 +128,9 @@ class Client:
         self.verify = verify
         self._cache: OrderedDict[tuple, Answer] = OrderedDict()
         self._local = threading.local()
+        # Every connection any thread opened, so `close()` can reach the ones it
+        # did not open itself. Guarded by `_books`.
+        self._connections: list = []
         self._pipe = None
         self._pool: ThreadPoolExecutor | None = None
         self._ledgers: dict[str, Ledger] = {}
@@ -147,7 +150,17 @@ class Client:
 
     # -- the one call ------------------------------------------------------
     def _trust(self) -> ssl.SSLContext:
-        """The context to verify the server with, built once per call site."""
+        """
+        The context to verify the server with, built once per call site.
+
+        An `ssl.SSLContext` you pass is used as it stands, and on the fast path
+        it is also modified: ALPN has to advertise h2 on the context itself or
+        the connection quietly comes up as HTTP/1.1, and there is no way to copy
+        a context to leave yours alone. So a context handed to a `Client` with
+        the HTTP/2 extra installed comes back with `set_alpn_protocols(["h2",
+        "http/1.1"])` applied. Pass a context of this client's own if that
+        matters; nothing else about it is touched.
+        """
         if isinstance(self.verify, SSL_CONTEXT):
             return self.verify
         if self.verify is not None:
@@ -169,6 +182,12 @@ class Client:
                 context=self._trust())
             self.http_version = "HTTP/1.1"      # the standard library speaks one protocol
         self._local.connection = connection
+        # Also held centrally. A connection belongs to the worker thread that
+        # opened it, and `close()` runs on the caller's, so without this the
+        # workers' sockets were left for the garbage collector to notice: the
+        # one thing `close()` exists to make unnecessary.
+        with self._books:
+            self._connections.append(connection)
         return connection
 
     def _drop_connection(self) -> None:
@@ -179,6 +198,11 @@ class Client:
             except OSError:
                 pass
             self._local.connection = None
+            with self._books:
+                # Discarded rather than left to accumulate: a long run with
+                # retries reopens often, and the list would grow all run.
+                if connection in self._connections:
+                    self._connections.remove(connection)
 
     def ask(self, body: dict) -> dict:
         """
@@ -203,7 +227,25 @@ class Client:
                 payload = answer.read()
                 self._note_latency((time.monotonic() - started) * 1000)
                 if answer.status == 200:
-                    return json.loads(payload.decode("utf-8"))
+                    try:
+                        return json.loads(payload.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                        # A 200 whose body is not the JSON we asked for: a proxy's
+                        # error page, a captive portal, a truncated response. This
+                        # is the same kind of event as a dropped connection and is
+                        # treated as one. Letting the ValueError out instead meant
+                        # it walked past `on_error="skip"`, which catches JevError
+                        # and nothing else, and abandoned a run that was supposed
+                        # to survive exactly this.
+                        self._drop_connection()
+                        if attempt == MAX_RETRIES - 1:
+                            raise JevError(
+                                f"Jev answered 200 with a body that is not JSON: "
+                                f"{payload.decode('utf-8', 'replace')[:300]!r}") from error
+                        wait = _http2._backoff(attempt, None)
+                        self._count_retry(0, wait)
+                        time.sleep(wait)
+                        continue
                 hint = answer.getheader("retry-after")
                 self._drop_connection()
                 if answer.status not in RETRY_STATUSES or attempt == MAX_RETRIES - 1:
@@ -285,13 +327,24 @@ class Client:
         for ledger in self._ledgers.values():
             ledger.close()
         self._ledgers.clear()
-        self._drop_connection()
+        # The workers go first. Their connections are theirs, and closing a
+        # socket out from under a thread still using it is a different bug from
+        # the one this is fixing.
         if self._pool is not None:
             self._pool.shutdown(wait=True)
             self._pool = None
         if self._pipe is not None:
             self._pipe.close()
             self._pipe = None
+        self._drop_connection()
+        with self._books:
+            leftover, self._connections = self._connections, []
+        for connection in leftover:
+            try:
+                connection.close()
+            except OSError:
+                pass
+
     def stream(
         self,
         items: Iterable[str],
@@ -414,7 +467,15 @@ class Client:
         prepared = []
         # Copied once per distinct question, not per row, so the rows that share
         # one share the object. The engine leans on that.
-        copies: dict[int, tuple] = {}
+        copies: dict[tuple, tuple] = {}
+        # The memo above is keyed on the identity of the caller's own objects, so
+        # it has to hold them. `asks` is an Iterable and a generator is the
+        # obvious way to feed a million rows: without this the Ask is freed as
+        # soon as the loop body ends, CPython hands the same address to a later
+        # row's dict, and that row is quietly answered with an earlier row's
+        # question. No error, no retry, nothing in usage. Five rows in eight, in
+        # the test that now covers it.
+        alive: list[Ask] = []
         for index, ask in enumerate(asks):
             if not isinstance(ask, Ask):
                 raise JevError(f"judge() takes Ask objects; item {index + 1} is a "
@@ -435,6 +496,7 @@ class Client:
                 settled = copies[mark] = (words, dict(these) if these else these,
                                           dict(those) if those else those,
                                           tuple(steps) if steps else steps)
+                alive.append(ask)          # see `alive` above; this is what keeps `mark` true
             prepared.append(_Ask(_clean(ask.item, index), *settled))
         return list(self._answers_for(prepared, on_progress, checkpoint, on_error))
 
@@ -635,6 +697,25 @@ class Client:
             self.last_partial = [answer for answer in answers if answer is not None]
             if ledger is not None:
                 ledger.flush()
+            raise
+        except GeneratorExit:
+            # The caller stopped reading: broke out of the loop, or let the
+            # generator go. Nothing further should be sent for a job nobody is
+            # listening to, and this used to fall straight through to `finally`,
+            # which flushes but does not stop anything.
+            #
+            # Deliberately lighter than the abandonment path above: no draining,
+            # because `break` should return promptly rather than block for
+            # DRAIN_S, and what is already in the air is left to land on its own
+            # thread rather than cancelled mid-flight.
+            queued.clear()
+            if run is not None:
+                if not run.broken:
+                    run.broken = "the caller stopped reading"
+            else:
+                for future in flying:
+                    future.cancel()          # threads: only the ones not started yet
+            self.last_partial = [answer for answer in answers if answer is not None]
             raise
         finally:
             if ledger is not None:

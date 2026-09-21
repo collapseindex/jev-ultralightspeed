@@ -37,7 +37,9 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, "src")
+# Anchored to the file, not to where you happen to be standing.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from jev_ultralightspeed import Client  # noqa: E402
 from jev_ultralightspeed._limits import _Limiter  # noqa: E402
@@ -71,7 +73,7 @@ class Watched(_Limiter):
             self.admitted.append(time.monotonic())
         return wait
 
-OUT = Path("data/results")
+OUT = ROOT / "data" / "results"
 PUBLISHED_PER_MINUTE = 1_200     # what TypeSafe documents
 PUBLISHED_TOKENS_PER_SECOND = 250_000
 INSTRUCTIONS = "Does this message need a human to look at it?"

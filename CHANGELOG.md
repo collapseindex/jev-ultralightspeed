@@ -1,5 +1,66 @@
 # Changelog
 
+## v0.20.0 (2026-09-20)
+
+An outside review read the source and found a bug that answers rows with the wrong question and says
+nothing about it. That one is the reason for this release; three smaller ones and a tidy-up came with
+it.
+
+### Fixed
+- **`judge()` sent the wrong criteria when `asks` was a generator.** The questions are memoised on the
+  identity of the caller's own objects, and nothing held those objects. With a generator each `Ask`
+  was freed as soon as the loop body ended, CPython handed the same address to a later row's dict,
+  the memo hit, and that row went out carrying an earlier row's question. Reproduced at **five rows
+  in eight**: no error, no retry, nothing in `usage`.
+
+  `asks` is typed `Iterable[Ask]` and a generator is the obvious way to feed a million rows, which is
+  the case the method exists for. It survived because the module-level `judge()` does `list(asks)`
+  and every test passed a list. The memo now holds a reference to each Ask that introduced a
+  question, so the identity it keys on stays true, and a test drives two thousand rows through a
+  generator and checks the criteria on the wire. Found by review, not by us.
+
+- **A 200 whose body is not JSON escaped as a `ValueError`.** `json.JSONDecodeError` is a subclass of
+  `ValueError`, which is not `JevError`, so it walked past `on_error="skip"` and every other net in
+  the library. A proxy, a captive portal or a gateway answering 200 with an HTML error page is an
+  ordinary production event. It is now treated as the same kind of event as a dropped connection:
+  the connection is dropped, the attempt is retried and counted under status 0, and the last attempt
+  raises a `JevError` that says what came back. Both transports.
+
+- **Breaking out of `stream()` stopped nothing.** `GeneratorExit` is not a `JevError`, so it bypassed
+  the handler that clears the queue and tells the run to stop, and landed in `finally`, which flushes
+  but stops nothing. Now handled, deliberately more lightly than the abandonment path: no draining,
+  because `break` should return promptly, and requests already in the air are left to land rather
+  than cancelled mid-flight. The unsent queue was never submitted either way, so this is smaller than
+  it sounds: on the test server, reading one answer out of four hundred items cost 12 requests before
+  and 7 now on threads, 9 and 6 on the fast path.
+
+- **`close()` left the workers' sockets to the garbage collector.** A connection belongs to the thread
+  that opened it and `close()` runs on the caller's, so it only ever closed its own. Every connection
+  is now also held centrally and closed, after the pool has been shut down so that nothing is still
+  using one.
+
+### Changed
+- **The benches live in `bench/` and dropped the `bench_` prefix**: `bench/eval.py`,
+  `bench/confidence.py`, `bench/sustained.py` and the rest, with `bench.py` becoming `bench/sweep.py`.
+  `demo.py` stays at the root, because it is what the README opens with and it is not a benchmark.
+  Their paths are anchored to the file now rather than to the working directory, so they run from
+  anywhere, and `bench/cpu.py` and `bench/throttle.py` work outside an installed checkout for the
+  first time. A test checks that every script the README names exists, because thirty-nine references
+  moved and remembering is not a method.
+
+- **The `verify=` docstring says that a context you pass is modified.** ALPN has to advertise h2 on
+  the context itself or the connection quietly comes up as HTTP/1.1, and an `SSLContext` cannot be
+  copied, so there is no version of this that leaves the caller's object alone. Saying so beats
+  surprising someone.
+
+- **The README leads with what the 32x depends on.** It holds because the ceiling counts requests; if
+  that ever counts tokens, the 32 evaporates and the 41% is what is left. `guidance="once"`, which
+  took a live 32-item request from 4,598 billed tokens to 1,777, is the saving that survives a rate
+  card being rewritten, and it was buried as a non-default. Still a non-default, now mentioned where
+  people read.
+
+186 tests, four Pythons, three operating systems, a linter, and a volume job.
+
 ## v0.19.0 (2026-09-20)
 
 v0.18.0 established that the triage finding holds across three corpora and that the threshold behind

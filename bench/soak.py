@@ -19,8 +19,11 @@ import random
 import sys
 import time
 from collections import Counter
+from pathlib import Path
 
-sys.path.insert(0, "src")
+# Anchored to the file, not to where you happen to be standing.
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 from jev_ultralightspeed import Client  # noqa: E402
 
