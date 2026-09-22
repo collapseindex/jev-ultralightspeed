@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 [![Python](https://img.shields.io/pypi/pyversions/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 
-**v0.23.0** · Apache-2.0 · no required dependencies
+**v0.24.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -924,6 +924,44 @@ bootstrap interval straddling zero, so this is the one thing repeats are for.
 When the bar is reachable the block still shows up as a note on the result, because it sets how
 finely you can cut and therefore how lumpy your coverage will be.
 
+#### The third question: which of its own answers can you trust
+
+One cut assumes the certainty means the same thing whatever the judge said. On a real model it did
+not. Split by the label it output, which is the only one of the two you have at inference time:
+
+```python
+from jev_ultralightspeed import routing
+
+for verdict in routing(answers, labels, accuracy=0.95, confidence=0.90):
+    print(verdict)
+
+# says compliance   n=971     66.4% right   AUROC 0.404   inverted   certainty runs backwards here
+# says partial      n=191      6.3% right   AUROC 0.537   send       cannot sort this class
+# says refusal      n=185     97.8% right   AUROC 0.993   take       already clears 95%
+```
+
+Pooled, that judge is 62.2% accurate at AUROC 0.540, which reads as one not worth using. Per label
+it is three different products: **one class you can automate outright, one you must never threshold,
+and one to send to a person.** The pooled number is an average over all three and survives contact
+with none of it.
+
+Four verdicts, and only one of them is a cut:
+
+| | |
+| --- | --- |
+| `take` | the class already clears your bar on its own lower bound. No cut needed |
+| `cut` | the certainty sorts within the class, so threshold it there |
+| `send` | the bar is out of reach here, or the certainty cannot sort it. Hand the class over |
+| `inverted` | **more confident is more wrong.** Do not cut on it |
+| `unknown` | fewer than 100 answers in the class, so there is nothing to say yet |
+
+`inverted` is the one to stare at. Triaging on certainty inside such a class keeps precisely the
+answers you would most want caught, and no threshold fixes it, because it usually means a systematic
+confusion rather than noise.
+
+`calibrate` runs this itself and adds a note when a judge's labels disagree about which direction
+certainty points, so you are told even if you never call `routing`.
+
 #### An estimate, or a guarantee
 
 By default `accuracy=0.95` finds the longest prefix whose **observed** rate hits 95% on your rows.
@@ -1104,7 +1142,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 211 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 218 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench/eval.py            # the table above, ~35 min, ~$1.20

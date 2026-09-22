@@ -28,9 +28,11 @@ from ._answers import Answer, Ask, Usage, _Ask, _copy_answer, _read, triage  # n
 from ._calibrate import (  # noqa: F401
     Calibration,
     Resolution,
+    Verdict,
     calibrate,
     discrimination,
     resolution,
+    routing,
 )
 from ._client import Client, classify, judge  # noqa: F401
 from ._errors import JevError  # noqa: F401
@@ -67,8 +69,8 @@ from ._settings import (
                         WORKERS,
 )
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 __all__ = ["Answer", "Ask", "Calibration", "Client", "JevError", "Resolution",
-           "Usage", "calibrate", "classify", "discrimination", "judge",
-           "resolution", "triage"]
+           "Usage", "Verdict", "calibrate", "classify", "discrimination", "judge",
+           "resolution", "routing", "triage"]

@@ -25,6 +25,7 @@ from jev_ultralightspeed import (  # noqa: E402
     calibrate,
     discrimination,
     resolution,
+    routing,
 )
 
 
@@ -428,3 +429,112 @@ def test_a_fine_grained_judge_reaches_bars_a_crowded_one_cannot():
     spread, spread_gold = a_judge(3_000, honest=True, seed=5)
     grain = resolution(spread, spread_gold, accuracy=0.99)
     assert grain.levels > grain.share * 100
+
+
+# -- one verdict per label, because one cut over all of them is an average ---
+
+def a_judge_with_unlike_labels(seed: int = 11):
+    """
+    Three labels, three different relationships between certainty and truth.
+
+    Modelled on a real measurement: one label where the judge is right almost
+    always and its certainty orders the rest correctly, one where certainty runs
+    backwards, and one where it is wrong nearly every time. Pooled they look
+    like a mediocre judge with no signal, which is exactly the point.
+    """
+    dice = random.Random(seed)
+    answers, gold = [], []
+
+    for _ in range(300):                      # trustworthy, and well ordered
+        sure = dice.uniform(0.5, 1.0)
+        answers.append(Answer(item="", p=round(sure, 3), label="good", kind="choice"))
+        gold.append("good" if dice.random() < 0.90 + 0.09 * sure else "bad")
+    for _ in range(600):                      # certainty pointing the wrong way
+        sure = dice.uniform(0.5, 1.0)
+        answers.append(Answer(item="", p=round(sure, 3), label="backwards", kind="choice"))
+        gold.append("backwards" if dice.random() < 0.95 - 0.6 * sure else "good")
+    for _ in range(300):                      # almost always wrong, unsortable
+        answers.append(Answer(item="", p=round(dice.uniform(0.5, 1.0), 3),
+                              label="hopeless", kind="choice"))
+        gold.append("hopeless" if dice.random() < 0.07 else "good")
+
+    order = list(range(len(answers)))
+    dice.shuffle(order)
+    return [answers[i] for i in order], [gold[i] for i in order]
+
+
+def test_routing_tells_the_three_kinds_of_label_apart():
+    answers, gold = a_judge_with_unlike_labels()
+    verdicts = {v.label: v for v in routing(answers, gold, accuracy=0.90)}
+    assert set(verdicts) == {"good", "backwards", "hopeless"}
+
+    assert verdicts["good"].action in ("take", "cut")
+    assert verdicts["good"].discrimination > 0.5
+
+    assert verdicts["backwards"].action == "inverted", verdicts["backwards"]
+    assert verdicts["backwards"].high < 0.5, (
+        "an inverted verdict needs its interval below a coin flip")
+    assert verdicts["backwards"].cut is None or verdicts["backwards"].coverage == 0.0
+
+    assert verdicts["hopeless"].action == "send"
+    assert verdicts["hopeless"].accuracy < 0.2
+
+
+def test_routing_finds_a_class_worth_keeping_inside_a_judge_worth_refusing():
+    """The whole reason this exists: the pooled number throws the good class away."""
+    answers, gold = a_judge_with_unlike_labels()
+    pooled = discrimination(answers, gold)
+    assert pooled < 0.65, "the pooled figure should look unpromising here"
+
+    best = max(routing(answers, gold, accuracy=0.90),
+               key=lambda v: v.discrimination if v.discrimination == v.discrimination else 0)
+    assert best.discrimination > pooled + 0.15, (
+        f"pooled {pooled:.3f} should hide a much better class, best was "
+        f"{best.discrimination:.3f}")
+
+
+def test_a_label_with_too_few_answers_is_not_judged():
+    answers, gold = a_judge_with_unlike_labels()
+    answers += [Answer(item="", p=0.9, label="rare", kind="choice") for _ in range(12)]
+    gold += ["rare"] * 12
+    verdicts = {v.label: v for v in routing(answers, gold, accuracy=0.90)}
+    assert verdicts["rare"].action == "unknown"
+    assert "too few" in verdicts["rare"].why
+
+
+def test_calibrate_says_so_when_its_labels_disagree():
+    """
+    A caller who never reaches for routing() still has to be told.
+
+    The bar has to be one this judge can actually reach, or calibrate refuses
+    before it gets as far as writing any notes, which is its own correct
+    behaviour and not what this test is about.
+    """
+    answers, gold = a_judge_with_unlike_labels()
+    cal = Calibration.from_answers(answers, gold, accuracy=0.60, min_signal=0.0)
+    said = " ".join(cal.notes)
+    assert "routing()" in said, cal
+    assert "backwards" in said or "better inside some" in said, cal
+
+
+def test_routing_refuses_a_bar_that_is_not_a_fraction():
+    answers, gold = a_judge_with_unlike_labels()
+    for bad in (0.0, 1.0, 1.4, -0.2):
+        with pytest.raises(JevError):
+            routing(answers, gold, accuracy=bad)
+
+
+def test_routing_and_calibrate_agree_about_confidence_levels():
+    answers, gold = a_judge_with_unlike_labels()
+    with pytest.raises(JevError):
+        routing(answers, gold, accuracy=0.90, confidence=0.77)
+    assert routing(answers, gold, accuracy=0.90, confidence=0.95)
+
+
+def test_a_bound_only_ever_lowers_a_class_verdict():
+    """The floor is a lower bound, so asking for confidence cannot flatter a class."""
+    answers, gold = a_judge_with_unlike_labels()
+    loose = {v.label: v for v in routing(answers, gold, accuracy=0.90)}
+    tight = {v.label: v for v in routing(answers, gold, accuracy=0.90, confidence=0.95)}
+    for label in loose:
+        assert tight[label].floor <= loose[label].floor + 1e-9, label

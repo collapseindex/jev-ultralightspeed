@@ -181,6 +181,14 @@ def discrimination(answers: Sequence[Answer], gold: Sequence[str]) -> float:
     rows = _scored(answers, gold)
     if not rows:
         raise JevError("no usable answers to measure")
+    area = _auroc(rows)
+    if area != area:
+        raise JevError("every answer went the same way, so there is nothing to separate")
+    return area
+
+
+def _auroc(rows: list[tuple[float, float]]) -> float:
+    """The Mann-Whitney statistic, or nan when every answer went one way."""
     pairs = sorted(rows, key=lambda row: row[0])
     ranks: dict[int, float] = {}
     index = 0
@@ -194,9 +202,39 @@ def discrimination(answers: Sequence[Answer], gold: Sequence[str]) -> float:
     right = sum(correct for _certainty, correct in pairs)
     wrong = len(pairs) - right
     if not right or not wrong:
-        raise JevError("every answer went the same way, so there is nothing to separate")
+        return float("nan")
     got = sum(ranks[position] for position, (_c, correct) in enumerate(pairs) if correct)
     return (got - right * (right + 1) / 2) / (right * wrong)
+
+
+def _auroc_interval(rows: list[tuple[float, float]]) -> tuple[float, float, float]:
+    """
+    AUROC and a 95% interval, closed form.
+
+    Hanley and McNeil 1982, checked against a 1,000 round bootstrap on real
+    runs: at n=944 the two agree to three decimals, and at n=175 this one is
+    wider, [0.642, 1.000] against [0.690, 0.977]. Erring wide at small n is the
+    right direction for a check that decides whether to trust a class, and it
+    avoids a bootstrap nobody will wait for.
+    """
+    area = _auroc(rows)
+    right = sum(correct for _certainty, correct in rows)
+    wrong = len(rows) - right
+    if area != area or not right or not wrong:
+        return area, float("nan"), float("nan")
+    q1 = area / (2 - area)
+    q2 = 2 * area * area / (1 + area)
+    variance = (area * (1 - area) + (right - 1) * (q1 - area * area)
+                + (wrong - 1) * (q2 - area * area)) / (right * wrong)
+    spread = 1.96 * math.sqrt(max(variance, 0.0))
+    return area, max(0.0, area - spread), min(1.0, area + spread)
+
+
+def _z_for(confidence: float) -> float:
+    """The one-sided z for a confidence level, or zero for a point estimate."""
+    if confidence and confidence not in Z_FOR:
+        raise JevError(f"confidence is one of {sorted(Z_FOR)}, not {confidence}")
+    return Z_FOR.get(confidence or 0.0, 0.0)
 
 
 def _scored(answers: Sequence[Answer], gold: Sequence[str]) -> list[tuple[float, float]]:
@@ -392,6 +430,107 @@ def _crowding(rows: list[tuple[float, float]], accuracy: float) -> Resolution | 
                       reachable=0.0, asked=accuracy)
 
 
+# Below this a class has too few answers to say anything about, so the gate says
+# so rather than reading noise. Set where the interval stops being actionable:
+# at n=175 it already spans 0.64 to 1.00.
+FEW_IN_CLASS = 100
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What to do with the answers a judge filed under one label."""
+
+    label: str
+    count: int
+    accuracy: float
+    floor: float                      # accuracy on a lower bound, not the estimate
+    discrimination: float
+    low: float
+    high: float
+    cut: float | None
+    coverage: float
+    action: str                       # take, cut, send, inverted, unknown
+    why: str
+
+    def __str__(self) -> str:
+        known = self.discrimination == self.discrimination
+        area = f"{self.discrimination:.3f}" if known else "  -  "
+        return (f"says {self.label:<12} n={self.count:<6} {self.accuracy:>6.1%} right   "
+                f"AUROC {area}   {self.action:<9} {self.why}")
+
+
+def routing(answers: Sequence[Answer], gold: Sequence[str], *,
+            accuracy: float, confidence: float = 0.0) -> list[Verdict]:
+    """
+    Which of this judge's own answers you can trust, one verdict per label.
+
+        for verdict in routing(answers, labels, accuracy=0.95):
+            print(verdict)
+
+    One cut over everything assumes the certainty means the same thing whatever
+    the judge said, and it does not. Split by the label it output, which is the
+    only one of the two you have at inference time, and the three questions come
+    apart: a class can already clear your bar and need no cut, or be unsortable
+    and need a person, or have its certainty pointing **backwards**.
+
+    Measured on a shipped model over 1,347 rows, its own three labels:
+
+        says refusal      n=185   97.8% right   AUROC 0.993
+        says compliance   n=971   66.4% right   AUROC 0.404   inverted
+        says partial      n=191    6.3% right   no signal
+
+    Pooled, that is 62% and AUROC 0.540, which reads as a judge not worth using.
+    Per label it is one class you can automate outright, one you must never
+    threshold, and one to send to a person. Nothing in the pooled number
+    survives contact with that, and `calibrate` returns the pooled number.
+
+    `inverted` is the verdict worth staring at. It means more confident is more
+    wrong inside that class, so triaging on certainty there keeps precisely the
+    answers you would most want caught. It usually means a systematic confusion
+    rather than noise, and no threshold fixes it.
+    """
+    if not 0.0 < accuracy < 1.0:
+        raise JevError(f"accuracy has to be between 0 and 1, not {accuracy}")
+    z = _z_for(confidence)
+    if len(answers) != len(gold):
+        raise JevError(f"{len(answers)} answers and {len(gold)} labels; they have to line up")
+
+    grouped: dict[str, list[tuple[float, float]]] = {}
+    for answer, want in zip(answers, gold, strict=True):
+        if answer.ok:
+            grouped.setdefault(answer.label, []).append(
+                (answer.certainty, 1.0 if answer.label == want else 0.0))
+    if not grouped:
+        raise JevError("no usable answers to route")
+
+    out = []
+    for label, rows in sorted(grouped.items(), key=lambda pair: -len(pair[1])):
+        got = statistics.mean(correct for _certainty, correct in rows)
+        floor = _wilson_lower(got, len(rows), z) if z > 0 else got
+        area, low, high = _auroc_interval(rows)
+        cut = _cut_for_accuracy(rows, accuracy, z)
+        coverage = _at(rows, cut)[0] if cut is not None else 0.0
+
+        if len(rows) < FEW_IN_CLASS:
+            action, why = "unknown", f"{len(rows)} answers is too few to judge this class on"
+        elif floor >= accuracy:
+            action, why = "take", (f"already clears {accuracy:.0%} on its own"
+                                   f"{f' lower bound, {floor:.1%}' if z > 0 else f', {floor:.1%}'}")
+        elif high == high and high < 0.5:
+            action, why = "inverted", (f"certainty runs backwards here, AUROC up to {high:.3f}. "
+                                       f"Do not cut on it")
+        elif area != area or low != low or low <= 0.5 or area < MIN_SIGNAL:
+            action, why = "send", "the certainty cannot sort this class; send all of it"
+        elif cut is None or coverage <= 0:
+            action, why = "send", f"it sorts, but no cut in it reaches {accuracy:.0%}"
+        else:
+            action, why = "cut", f"at {cut:.3f}, keeping {coverage:.0%} of the class"
+        out.append(Verdict(label=label, count=len(rows), accuracy=got, floor=floor,
+                           discrimination=area, low=low, high=high, cut=cut,
+                           coverage=coverage, action=action, why=why))
+    return out
+
+
 def _at(rows: list[tuple[float, float]], cut: float) -> tuple[float, float]:
     """Coverage and accuracy over everything at or above `cut`, as triage would."""
     kept = [correct for certainty, correct in rows if certainty >= cut]
@@ -405,12 +544,10 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
           min_signal: float, confidence: float = 0.0) -> Calibration:
     if (keep is None) == (accuracy is None):
         raise JevError("say one of keep or accuracy, not both and not neither")
-    if confidence and confidence not in Z_FOR:
-        raise JevError(f"confidence is one of {sorted(Z_FOR)}, not {confidence}")
     if confidence and keep is not None:
         raise JevError("confidence applies to accuracy=, not keep=: with keep the cut is set "
                        "by the share you asked to keep, so there is no bar to be confident about")
-    z = Z_FOR.get(confidence or 0.0, 0.0)
+    z = _z_for(confidence)
     for name, value in (("keep", keep), ("accuracy", accuracy)):
         if value is not None and not 0.0 < value <= 1.0:
             raise JevError(f"{name} is a fraction above 0 and up to 1")
@@ -538,6 +675,29 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
     if baseline >= (accuracy or 0.0) and accuracy is not None:
         notes.append(f"the judge already agrees {baseline:.1%} of the time without any cut, "
                      f"so you may not need one")
+    # One cut assumes the certainty means the same thing whatever the judge
+    # said, and on a real model it did not: 0.993 inside one of its labels and
+    # 0.404 inside another, pooling to 0.540. A caller who never reaches for
+    # `routing` should still be told that the number here is an average over
+    # classes that disagree about which direction certainty points.
+    if accuracy is not None:
+        split = routing(answers, gold, accuracy=accuracy, confidence=confidence)
+        backwards = [v for v in split if v.action == "inverted"]
+        if backwards:
+            worst = max(backwards, key=lambda v: v.count)
+            share = worst.count / sum(v.count for v in split)
+            notes.append(
+                f"on the {share:.0%} of answers it filed under {worst.label!r} the certainty "
+                f"runs backwards, AUROC {worst.discrimination:.3f}, so the cut above keeps "
+                f"the ones you would most want caught. See routing() for a verdict per label")
+        elif len(split) > 1:
+            known = [v for v in split if v.discrimination == v.discrimination]
+            if known and max(v.discrimination for v in known) - \
+                    min(v.discrimination for v in known) >= 0.25:
+                notes.append(
+                    "the certainty is far better inside some of this judge's labels than "
+                    "others, so one cut over all of them is an average of unlike things. "
+                    "See routing()")
     # The cut was fitted on every row and is then being asked about rows it has
     # not seen, so it flatters itself. Saying by how much is the whole reason the
     # held-out halves are here, and quietly handing back a number under the one

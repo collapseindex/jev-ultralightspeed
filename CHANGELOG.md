@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.24.0 (2026-09-22)
+
+One cut over a judge's whole output assumes its certainty means the same thing whatever it said.
+Measured on a shipped model over 1,347 labelled rows, it did not: AUROC 0.993 inside one of its
+three labels and 0.404 inside another, pooling to 0.540.
+
+### Added
+- **`routing(answers, gold, accuracy=..., confidence=...)`.** A verdict per label the judge
+  actually outputs, rather than one number over all of them. Returns `Verdict` rows carrying the
+  count, accuracy, a lower bound on it, AUROC with a 95% interval, a cut where one exists, and an
+  action:
+
+  ```
+  says compliance   n=971     66.4% right   AUROC 0.404   inverted   certainty runs backwards here
+  says partial      n=191      6.3% right   AUROC 0.537   send       cannot sort this class
+  says refusal      n=185     97.8% right   AUROC 0.993   take       already clears 95%
+  ```
+
+  That judge pools to 62.2% at AUROC 0.540, which reads as one not worth using. Per label it is one
+  class to automate outright, one never to threshold, and one to hand to a person.
+
+  `take` when the class clears your bar on its own lower bound, `cut` when the certainty sorts
+  within it, `send` when it cannot, `unknown` under 100 answers, and **`inverted`** when more
+  confident is more wrong. That last is the one to stare at: triaging on certainty inside such a
+  class keeps exactly the answers you would most want caught, and no threshold fixes it.
+
+- **`Verdict`** is exported alongside it.
+
+### Changed
+- **`calibrate` now says when a judge's labels disagree about which direction certainty points**,
+  so a caller who never reaches for `routing` is still told the cut it just returned is an average
+  over classes that do not resemble each other.
+- `discrimination` keeps its behaviour but the AUROC underneath it is now shared with `routing`,
+  along with a closed-form interval (Hanley and McNeil 1982, checked against a 1,000 round
+  bootstrap: agreeing to three decimals at n=944, and wider at n=175, which is the safe direction).
+
 ## v0.23.0 (2026-09-21)
 
 A cut is applied as `certainty >= cut`, so it keeps every answer sharing a value or none of them.
