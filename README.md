@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 [![Python](https://img.shields.io/pypi/pyversions/jev-ultralightspeed)](https://pypi.org/project/jev-ultralightspeed/)
 
-**v0.22.0** · Apache-2.0 · no required dependencies
+**v0.23.0** · Apache-2.0 · no required dependencies
 
 <img src="docs/infographic.png" alt="Regular Jev against Jev with ultralightspeed: many more items a second for less money, with the same agreement against human labels" width="100%" />
 
@@ -562,8 +562,8 @@ thresholds chosen on one half of the completions and measured on the other:
 | first 1000 | 852 | 336.7 | **89.7%** | 80% | 0.015 | 115 |
 | **first 500** | 499 | 264.6 | 88.6% | **80%** | **0.012** | **196** |
 | last 300 | 316 | 222.0 | 74.8% | 39% | 0.019 | 310 |
-| first 300 | 316 | 223.8 | **37.3%** | **0%** | — | 310 |
-| first 150 | 166 | 193.4 | 57.3% | 0% | — | 590 |
+| first 300 | 316 | 223.8 | **37.3%** | **0%** | n/a | 310 |
+| first 150 | 166 | 193.4 | 57.3% | 0% | n/a | 590 |
 
 **Trimming to 500 characters is worth it here.** It costs 0.8 points of raw agreement, keeps the same
 80% coverage at a 97% bar, takes a third off the cost per trusted item, and more than doubles the pack
@@ -879,6 +879,51 @@ worth more than any number in this README.
 On a run that clears the bar, the figure comes back on the result (`cal.discrimination`) and prints
 with it, so you can see how much the cut had to work with.
 
+#### The other question: can a cut exist at all
+
+`discrimination` asks whether the ranking knows right from wrong. A judge can pass that and still be
+impossible to threshold, and the reason is worth knowing because AUROC cannot see it: **tied ranks
+are averaged**, so a judge that ranks its work properly and one that reports a single number for two
+thirds of it score the same. A cut cannot average anything. It keeps a whole block of equal
+certainties or none of it.
+
+Judges crowd. Measured on 3,270 rows from one provider, **65% came back at exactly 1.000**, and that
+block was 96.5% accurate on its own:
+
+```python
+from jev_ultralightspeed import resolution
+
+grain = resolution(answers, labels, accuracy=0.97)
+print(grain)
+# 61 distinct certainties, 65% of answers tied at 1.000
+#   that block is 96.5% accurate on its own
+#   at 97% a cut can keep at most 0% of the pile
+grain.blocked                        # True
+```
+
+Zero, not "expensive". At a 97% bar there is no cut on that run at any coverage, even knowing every
+label in advance, because the one block a cut would have to take is half a point short. Its pooled
+AUROC was a healthy 0.785 throughout.
+
+`calibrate` checks this itself and says which of the two problems you have, because the fixes are
+opposite:
+
+```
+JevError: no cut reaches 97% on these rows, and more labels will not change that. 65% of the
+answers are tied at 1.000 and that block is 96.5% accurate on its own, so a cut either keeps
+all of it or none of it and neither clears the bar. The judge's certainty is too coarse here,
+not too weak: it reported 61 distinct values over 3,270 rows. Ask each item several times and
+average, which splits the block, or ask for less than 97%
+```
+
+**More labels cannot help a crowded pile, and more certainty can.** Asking each item several times
+and averaging splits the block: on that run six asks turned 61 distinct values into 259, and
+coverage at a 97% bar went from nothing to 59.8%. It buys almost nothing on AUROC, every paired
+bootstrap interval straddling zero, so this is the one thing repeats are for.
+
+When the bar is reachable the block still shows up as a note on the result, because it sets how
+finely you can cut and therefore how lumpy your coverage will be.
+
 #### An estimate, or a guarantee
 
 By default `accuracy=0.95` finds the longest prefix whose **observed** rate hits 95% on your rows.
@@ -1059,7 +1104,7 @@ must not be quietly skipped a million times. A test holds that line.
 
 ```bash
 pip install pytest
-python -m pytest tests -q        # 199 tests, a local server, no key and no network needed
+python -m pytest tests -q        # 211 tests, a local server, no key and no network needed
 JEV_PROPERTY_ITEMS=50000 python -m pytest tests/test_properties.py   # the volume ones, bigger
 
 TYPESAFE_API_KEY=... python bench/eval.py            # the table above, ~35 min, ~$1.20

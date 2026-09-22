@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.23.0 (2026-09-21)
+
+A cut is applied as `certainty >= cut`, so it keeps every answer sharing a value or none of them.
+The search for one did not know that, and judges crowd: measured on 3,270 rows from one provider,
+65% came back at exactly 1.000. So a bar could be certified over part of a block and then missed by
+the cut that deployed it.
+
+### Fixed
+- **`calibrate(accuracy=...)` could return a cut that misses the bar it was asked for.** The search
+  walked every prefix of the ranking, including prefixes ending inside a run of equal certainties,
+  which is a kept set no threshold can produce. Asking for 97% on a real 3,270 row run came back
+  with a cut of 1.000 that kept 65% of the rows at **96.5%**, and it did so with `confidence=0.9`
+  engaged, because the bound had been computed over 500 rows of a 2,127 row block and the cut then
+  kept all of it. Cuts are now only considered where the certainty changes, so a returned cut
+  delivers at or above its bar or there is no cut and it says so. On that run the honest answer at
+  97% is that none exists.
+
+  Held against real output at 0.95 and 0.97, with and without a bound, every returned cut now meets
+  its target. A property test over four bars and both modes covers it, and fails on the old rule
+  with "asked for 97%, the cut 1.000 delivers 96.50% over 2000 kept".
+
+- **The refusal message blamed the wrong thing.** With a bound in play it said the binding
+  constraint "is usually the count rather than the judge" and suggested labelling more rows. On a
+  crowded pile more labels cannot help, because the block is indivisible however well measured it
+  is. It now distinguishes the two cases and gives the remedy that matches.
+
+### Added
+- **`resolution(answers, gold, accuracy=None)`.** Whether the certainty is fine-grained enough to
+  cut at all. Returns the number of distinct values, the share of the pile sitting on the most
+  common one, how accurate that block is by itself, and the most a cut could keep at your bar.
+  `.blocked` is True when the bar is out of reach at any coverage.
+
+  **This is the check `discrimination` cannot make.** AUROC averages tied ranks, so a judge that
+  ranks its work properly and one that reports a single number for two thirds of it score the same.
+  The run above scored a healthy 0.785 while having no cut at 97%.
+
+  When it is blocked, the fix is more certainty rather than more labels. Asking each item several
+  times and averaging splits the block: on that run six asks turned 61 distinct values into 259 and
+  took coverage at a 97% bar from nothing to 59.8%. The same repeats move AUROC by +0.019
+  [+0.002, +0.036] at best and by nothing on two other corpora, every paired bootstrap interval
+  straddling zero, so splitting ties is what they are for.
+
+### Changed
+- The tie note on a `Calibration` now carries the block's own accuracy and how many distinct
+  certainties came back, and fires from 20% rather than 50%, because a fifth of the pile on one
+  value already decides how lumpy your coverage can be.
+
 ## v0.22.0 (2026-09-21)
 
 `calibrate(accuracy=...)` gave you a cut whose *observed* rate hit the bar on your rows. That is an

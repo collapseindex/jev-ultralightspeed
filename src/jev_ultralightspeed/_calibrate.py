@@ -245,18 +245,151 @@ def _cut_for_accuracy(rows: list[tuple[float, float]], target: float,
     between "these rows scored 95% here" and "these rows will score 95%", and it
     is not a small one: a cut fitted to the observed rate overshoots by however
     much the sample happened to flatter it, which is about half the time.
+
+    Only prefixes a cut can actually produce are eligible. See `_placeable`.
     """
-    ranked = sorted(rows, key=lambda row: -row[0])
-    right = 0.0
     best: float | None = None
-    for taken, (certainty, correct) in enumerate(ranked, start=1):
-        right += correct
-        if taken < FLOOR:
-            continue
-        reached = _wilson_lower(right / taken, taken, z) if z > 0 else right / taken
+    for certainty, _taken, reached in _rungs(rows, z):
         if reached >= target:
             best = certainty
     return best
+
+
+def _placeable(ranked: list[tuple[float, float]]) -> list[int]:
+    """
+    Where a cut may sit: the index ending each run of equal certainties.
+
+    A cut is applied as `certainty >= cut`, so it keeps every answer sharing a
+    value or none of them. Judges do not report a smooth spread: measured on one
+    provider, 53% of one corpus and 65% of another came back at exactly 1.000.
+    Scoring a prefix that stops inside such a run certifies a set that nothing
+    can deploy. Before this rule existed, asking for 97% on that second corpus
+    returned a cut keeping 65% of the rows at 96.5%, and it did so with the bound
+    engaged, because the bound was computed over 500 rows of a block and the cut
+    then kept all 2,127 of them.
+    """
+    return [index for index in range(len(ranked))
+            if index + 1 == len(ranked) or ranked[index + 1][0] != ranked[index][0]]
+
+
+def _rungs(rows: list[tuple[float, float]], z: float):
+    """Every cut a threshold could be, with what it reaches. Best first."""
+    ranked = sorted(rows, key=lambda row: -row[0])
+    running, right = [], 0.0
+    for _certainty, correct in ranked:
+        right += correct
+        running.append(right)
+    for index in _placeable(ranked):
+        taken = index + 1
+        if taken < FLOOR:
+            continue
+        hat = running[index] / taken
+        yield ranked[index][0], taken, (_wilson_lower(hat, taken, z) if z > 0 else hat)
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """
+    How finely a judge's certainty divides its own work.
+
+    `levels` is how many distinct certainties came back. `share` is how much of
+    the pile sits on the single most common one and `crowd_accuracy` is how
+    accurate that block is by itself. `reachable` is the most a cut could keep at
+    the bar you asked about, or None if you did not ask.
+    """
+
+    levels: int
+    crowd: float
+    share: float
+    crowd_accuracy: float
+    reachable: float | None = None
+    asked: float | None = None
+
+    @property
+    def blocked(self) -> bool:
+        """Whether the bar you asked for is out of reach at any coverage."""
+        return self.reachable is not None and self.reachable <= 0.0
+
+    def __str__(self) -> str:
+        lines = [f"{self.levels} distinct certainties, "
+                 f"{self.share:.0%} of answers tied at {self.crowd:.3f}",
+                 f"  that block is {self.crowd_accuracy:.1%} accurate on its own"]
+        if self.asked is not None:
+            lines.append(f"  at {self.asked:.0%} a cut can keep at most "
+                         f"{self.reachable:.0%} of the pile")
+        return "\n".join(lines)
+
+
+def resolution(answers: Sequence[Answer], gold: Sequence[str],
+               accuracy: float | None = None) -> Resolution:
+    """
+    Whether this judge's certainty is fine-grained enough to cut at all.
+
+    The check that AUROC cannot make. `discrimination` asks whether the ranking
+    knows right from wrong, and a judge can pass that and still be impossible to
+    threshold, because AUROC averages tied ranks: one that ranks its work
+    properly and one that reports a single number for two thirds of it score the
+    same. A cut cannot average anything. It keeps a whole block of equal
+    certainties or none of it.
+
+    Measured on one provider, 65% of a 3,270 row corpus came back at exactly
+    1.000 and that block was 96.5% accurate by itself. Its pooled AUROC was a
+    healthy 0.785, and at a 97% bar there was no cut at all, at any coverage,
+    even knowing every label in advance.
+
+    When a bar is blocked, the fix is not a cleverer cut or more labels. It is
+    more certainty to sort by. Asking each item several times and averaging
+    splits the block: on that corpus six asks turned 259 levels out of 61 and
+    took coverage at a 97% bar from nothing to 59.8%.
+
+        cal = resolution(answers, labels, accuracy=0.97)
+        if cal.blocked:
+            print(cal)          # and ask each item more than once
+    """
+    rows = _scored(answers, gold)
+    if not rows:
+        raise JevError("no usable answers to measure the resolution of")
+    counts: dict[float, int] = {}
+    for certainty, _correct in rows:
+        counts[certainty] = counts.get(certainty, 0) + 1
+    crowd = max(counts, key=lambda value: counts[value])
+    block = [correct for certainty, correct in rows if certainty == crowd]
+    reachable = None
+    if accuracy is not None:
+        reachable = max((taken / len(rows) for _c, taken, reached in _rungs(rows, 0.0)
+                         if reached >= accuracy), default=0.0)
+    return Resolution(levels=len(counts), crowd=crowd,
+                      share=counts[crowd] / len(rows),
+                      crowd_accuracy=statistics.mean(block),
+                      reachable=reachable, asked=accuracy)
+
+
+# A block bigger than this cannot be the incidental reason a bar was missed.
+CROWDED = 0.20
+
+
+def _crowding(rows: list[tuple[float, float]], accuracy: float) -> Resolution | None:
+    """
+    The resolution reading, but only when it is why the bar was missed.
+
+    Returns None unless one certainty holds a large share of the pile *and* that
+    block on its own fails the bar. Both halves matter: a big block that clears
+    the bar comfortably is not a problem, and a small one is not what stopped a
+    cut being found.
+    """
+    counts: dict[float, int] = {}
+    for certainty, _correct in rows:
+        counts[certainty] = counts.get(certainty, 0) + 1
+    crowd = max(counts, key=lambda value: counts[value])
+    share = counts[crowd] / len(rows)
+    if share < CROWDED:
+        return None
+    block = [correct for certainty, correct in rows if certainty >= crowd]
+    if statistics.mean(block) >= accuracy:
+        return None
+    return Resolution(levels=len(counts), crowd=crowd, share=share,
+                      crowd_accuracy=statistics.mean(block),
+                      reachable=0.0, asked=accuracy)
 
 
 def _at(rows: list[tuple[float, float]], cut: float) -> tuple[float, float]:
@@ -322,13 +455,22 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
             # Reported on the same footing the search used, or the message
             # contradicts itself: with a bound in play the best observed rate can
             # read 100% while nothing at all is certifiable.
-            ranked = sorted(rows, key=lambda row: -row[0])
-            right, best = 0.0, 0.0
-            for taken, (_certainty, correct) in enumerate(ranked, start=1):
-                right += correct
-                if taken >= FLOOR:
-                    best = max(best, _wilson_lower(right / taken, taken, z) if z > 0
-                               else right / taken)
+            best = max((reached for _c, _t, reached in _rungs(rows, z)), default=0.0)
+            # Which of the two reasons it is, because the fixes are opposite. A
+            # pile crowded onto one certainty cannot be cut however many labels
+            # arrive, and telling that caller to label more rows wastes their
+            # afternoon. Asking each item more than once is what helps there.
+            crowded = _crowding(rows, accuracy)
+            if crowded is not None:
+                raise JevError(
+                    f"no cut reaches {accuracy:.0%} on these rows, and more labels will not "
+                    f"change that. {crowded.share:.0%} of the answers are tied at "
+                    f"{crowded.crowd:.3f} and that block is {crowded.crowd_accuracy:.1%} "
+                    f"accurate on its own, so a cut either keeps all of it or none of it and "
+                    f"neither clears the bar. The judge's certainty is too coarse here, not too "
+                    f"weak: it reported {crowded.levels} distinct values over {len(rows):,} "
+                    f"rows. Ask each item several times and average, which splits the block, or "
+                    f"ask for less than {accuracy:.0%}")
             if z > 0:
                 raise JevError(
                     f"no cut clears {accuracy:.0%} with {confidence:.0%} confidence on these "
@@ -385,12 +527,14 @@ def _work(answers: list[Answer], gold: list[str], keep: float | None,
 
     # A judge that is sure of nearly everything leaves the ranking nothing to
     # sort by, and the coverage it settles on then has little to do with what was
-    # asked for. Seen on AG News, where four judgements in five come back at 1.000.
-    top = max(certainty for certainty, _ in rows)
-    tied = sum(1 for certainty, _ in rows if certainty >= top) / len(rows)
-    if tied > 0.5:
-        notes.append(f"{tied:.0%} of the answers tie at {top:.3f}, so no cut can keep less "
-                     f"than that and the ranking has little left to sort")
+    # asked for. Seen on AG News, where two judgements in three come back at 1.000.
+    grain = resolution(answers, gold)
+    if grain.share >= CROWDED:
+        notes.append(f"{grain.share:.0%} of the answers tie at {grain.crowd:.3f} and that "
+                     f"block is {grain.crowd_accuracy:.1%} accurate on its own, so a cut "
+                     f"keeps all of it or none of it. {grain.levels} distinct certainties "
+                     f"came back, which is the ceiling on how finely you can cut. Asking "
+                     f"each item several times and averaging splits the block")
     if baseline >= (accuracy or 0.0) and accuracy is not None:
         notes.append(f"the judge already agrees {baseline:.1%} of the time without any cut, "
                      f"so you may not need one")

@@ -24,6 +24,7 @@ from jev_ultralightspeed import (  # noqa: E402
     JevError,
     calibrate,
     discrimination,
+    resolution,
 )
 
 
@@ -325,3 +326,105 @@ def test_calibrate_checks_the_lengths_before_spending_anything():
 
     with pytest.raises(JevError, match="line up"):
         calibrate(["a", "b"], ["yes"], "Is it?", keep=0.8, client=Explodes())
+
+
+# -- a cut has to deliver the bar it was asked for ---------------------------
+
+def a_crowded_judge(block: int, tail: int, block_accuracy: float, *, seed: int = 3):
+    """
+    A judge that reports one certainty for most of its work.
+
+    Which is what real ones do: measured on a provider, 65% of a corpus came
+    back at exactly 1.000. A cut keeps that whole block or none of it, so a bar
+    the block cannot meet on its own is unreachable at any coverage, however
+    many labels arrive.
+    """
+    dice = random.Random(seed)
+    answers, gold = [], []
+    for index in range(block):
+        right = index < round(block * block_accuracy)
+        answers.append(Answer(item="", p=1.0, label="a", kind="choice"))
+        gold.append("a" if right else "b")
+    for _ in range(tail):
+        sure = dice.uniform(0.5, 0.95)
+        answers.append(Answer(item="", p=round(sure, 2), label="a", kind="choice"))
+        gold.append("a" if dice.random() < sure else "b")
+    order = list(range(len(answers)))
+    dice.shuffle(order)
+    return [answers[i] for i in order], [gold[i] for i in order]
+
+
+@pytest.mark.parametrize("bar", [0.90, 0.95, 0.97, 0.99])
+@pytest.mark.parametrize("confidence", [0.0, 0.90])
+def test_a_returned_cut_always_delivers_the_bar_it_promised(bar, confidence):
+    """
+    The regression that matters. A cut used to be scored on a prefix that
+    stopped inside a block of equal certainties, then applied as
+    `certainty >= cut`, which keeps the whole block. On real output that
+    returned a cut keeping 65% of the rows at 96.5% for a 97% bar, with the
+    bound engaged, because the bound had been computed over part of the block.
+    """
+    answers, gold = a_crowded_judge(2_000, 1_000, 0.965)
+    try:
+        cal = Calibration.from_answers(answers, gold, accuracy=bar,
+                                       confidence=confidence)
+    except JevError:
+        return                      # refusing is the other correct answer
+    kept = [1.0 if answer.label == want else 0.0
+            for answer, want in zip(answers, gold, strict=True)
+            if answer.certainty >= cal.cut]
+    assert kept, "a cut that keeps nothing should have been a refusal"
+    assert sum(kept) / len(kept) >= bar, (
+        f"asked for {bar:.0%}, the cut {cal.cut:.3f} delivers "
+        f"{sum(kept) / len(kept):.2%} over {len(kept)} kept")
+
+
+def test_an_unreachable_bar_blames_the_block_and_not_the_label_count():
+    """
+    The advice has to match the cause. Telling someone to label more rows when
+    their judge has crowded two thirds of its answers onto one value sends them
+    off to buy labels that cannot help.
+    """
+    answers, gold = a_crowded_judge(2_000, 1_000, 0.965)
+    with pytest.raises(JevError) as raised:
+        Calibration.from_answers(answers, gold, accuracy=0.99, confidence=0.90)
+    said = str(raised.value)
+    assert "more labels will not change that" in said
+    assert "tied at" in said
+    assert "several times" in said, "the remedy is more asks per item"
+    assert "label more rows" not in said
+
+
+def test_resolution_reports_the_block_and_whether_the_bar_is_reachable():
+    answers, gold = a_crowded_judge(2_000, 1_000, 0.965)
+    grain = resolution(answers, gold, accuracy=0.99)
+    assert grain.crowd == pytest.approx(1.0)
+    assert grain.share == pytest.approx(2 / 3, abs=0.01)
+    assert grain.crowd_accuracy == pytest.approx(0.965, abs=0.005)
+    assert grain.blocked, "0.99 is above what the block manages on its own"
+
+    easy = resolution(answers, gold, accuracy=0.90)
+    assert not easy.blocked
+    assert easy.reachable > 0.6, "the block alone clears 90%"
+
+    assert resolution(answers, gold).reachable is None, "no bar was asked about"
+
+
+def test_resolution_is_not_alarmed_by_a_judge_that_spreads_its_certainty():
+    answers, gold = a_judge(1_000, honest=True)
+    grain = resolution(answers, gold, accuracy=0.90)
+    assert grain.levels > 20, "an honest spread should use many values"
+    assert grain.share < 0.20
+
+
+def test_a_fine_grained_judge_reaches_bars_a_crowded_one_cannot():
+    """
+    Same accuracy, different resolution. The only thing that changes is how many
+    distinct certainties came back, and it decides whether a cut exists.
+    """
+    crowded, crowded_gold = a_crowded_judge(2_000, 1_000, 0.965)
+    assert resolution(crowded, crowded_gold, accuracy=0.99).blocked
+
+    spread, spread_gold = a_judge(3_000, honest=True, seed=5)
+    grain = resolution(spread, spread_gold, accuracy=0.99)
+    assert grain.levels > grain.share * 100

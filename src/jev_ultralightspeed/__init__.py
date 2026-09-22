@@ -25,7 +25,13 @@ from . import _http2, _ledger  # noqa: F401
 
 # Re-exported so the package is the one place anything is imported from.
 from ._answers import Answer, Ask, Usage, _Ask, _copy_answer, _read, triage  # noqa: F401
-from ._calibrate import Calibration, calibrate, discrimination  # noqa: F401
+from ._calibrate import (  # noqa: F401
+    Calibration,
+    Resolution,
+    calibrate,
+    discrimination,
+    resolution,
+)
 from ._client import Client, classify, judge  # noqa: F401
 from ._errors import JevError  # noqa: F401
 from ._limits import _Limiter  # noqa: F401
@@ -61,7 +67,8 @@ from ._settings import (
                         WORKERS,
 )
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
-__all__ = ["Answer", "Ask", "Calibration", "Client", "JevError", "Usage",
-           "calibrate", "classify", "discrimination", "judge", "triage"]
+__all__ = ["Answer", "Ask", "Calibration", "Client", "JevError", "Resolution",
+           "Usage", "calibrate", "classify", "discrimination", "judge",
+           "resolution", "triage"]
